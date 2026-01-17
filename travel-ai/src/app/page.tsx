@@ -6,6 +6,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 interface FlightParams {
   departure_airport_code: string | null;
@@ -47,6 +48,43 @@ interface ProcessedFlight {
   bookingUrl?: string;
 }
 
+interface DetectedLocation {
+  name: string;
+  description: string;
+  confidence: number;
+  type: "landmark" | "business" | "area" | "region";
+  coordinates?: {
+    lat?: number;
+    lng?: number;
+  };
+}
+
+interface VideoAnalysisResult {
+  videoUrl: string;
+  platform: string;
+  locations: DetectedLocation[];
+  detectedText: string[];
+  sceneDescription: string;
+  suggestedDestination?: string;
+}
+
+interface ItineraryPlan {
+  destination: string;
+  dates: string;
+  budget: string;
+  traveler_profile: string;
+  flights: { origin: string; cabin: string; notes: string };
+  hotel: { area: string; nights: number; style: string; notes: string };
+  itinerary: Array<{
+    day: number;
+    title: string;
+    morning: string[];
+    afternoon: string[];
+    evening: string[];
+  }>;
+  booking_ctas: { flight: string; hotel: string; activities: string };
+}
+
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -60,6 +98,12 @@ export default function Home() {
   const [flights, setFlights] = useState<ProcessedFlight[]>([]);
   const [searchComplete, setSearchComplete] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  
+  // Video analysis state
+  const [videoUrl, setVideoUrl] = useState("");
+  const [videoAnalysis, setVideoAnalysis] = useState<VideoAnalysisResult | null>(null);
+  const [analyzingVideo, setAnalyzingVideo] = useState(false);
+  const [itineraryPlan, setItineraryPlan] = useState<ItineraryPlan | null>(null);
 
   async function parsePrompt(userMessage: string, previousData?: FlightParams) {
     const res = await fetch("/api/parse-flight", {
@@ -187,16 +231,99 @@ export default function Home() {
     };
   }
 
+  async function analyzeVideo() {
+    if (!videoUrl.trim() || analyzingVideo) return;
+
+    setAnalyzingVideo(true);
+    setError(null);
+    setVideoAnalysis(null);
+    setItineraryPlan(null);
+
+    try {
+      const res = await fetch("/api/analyze-video", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ videoUrl: videoUrl.trim() }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data?.error || "Failed to analyze video");
+      }
+
+      const result: VideoAnalysisResult = await res.json();
+      setVideoAnalysis(result);
+
+      // Automatically generate itinerary from detected locations
+      if (result.locations.length > 0 || result.suggestedDestination) {
+        await generateItineraryFromLocations(result);
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setAnalyzingVideo(false);
+    }
+  }
+
+  async function generateItineraryFromLocations(analysis: VideoAnalysisResult) {
+    try {
+      // Build a prompt from detected locations
+      const locationNames = analysis.locations.map((l) => l.name).join(", ");
+      const destination = analysis.suggestedDestination || locationNames.split(",")[0] || "the destination";
+      
+      const itineraryPrompt = `Create a travel itinerary for ${destination}. 
+Based on the following locations detected in a video:
+${locationNames}
+
+Scene description: ${analysis.sceneDescription}
+
+Detected places to visit: ${locationNames}
+${analysis.detectedText.length > 0 ? `\nOther context: ${analysis.detectedText.join(", ")}` : ""}
+
+Plan a 3-5 day trip including these locations and other must-see spots in the area.`;
+
+      const res = await fetch("/api/plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: itineraryPrompt }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data?.error || "Failed to generate itinerary");
+      }
+
+      const plan: ItineraryPlan = await res.json();
+      setItineraryPlan(plan);
+    } catch (err: any) {
+      console.error("Itinerary generation error:", err);
+      // Don't throw - analysis succeeded even if itinerary generation fails
+    }
+  }
+
   return (
     <main className="mx-auto max-w-4xl p-6 space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold">✈️ AI Travel Agent</h1>
-        {(flightParams || searchComplete) && (
-          <Button variant="outline" size="sm" onClick={resetSearch}>
+        {(flightParams || searchComplete || videoAnalysis) && (
+          <Button variant="outline" size="sm" onClick={() => {
+            resetSearch();
+            setVideoUrl("");
+            setVideoAnalysis(null);
+            setItineraryPlan(null);
+          }}>
             New Search
           </Button>
         )}
       </div>
+
+      <Tabs defaultValue="flights" className="w-full">
+        <TabsList>
+          <TabsTrigger value="flights">✈️ Flight Search</TabsTrigger>
+          <TabsTrigger value="video">🎥 Video Itinerary</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="flights" className="space-y-6">
 
       {/* Chat Messages */}
       <Card>
@@ -362,6 +489,192 @@ export default function Home() {
           </Button>
         </form>
       )}
+
+      {error && (
+        <p className="text-sm text-red-600 bg-red-50 p-3 rounded-lg">{error}</p>
+      )}
+        </TabsContent>
+
+        <TabsContent value="video" className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle>📹 Analyze Instagram Reel or TikTok</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                Paste an Instagram Reel or TikTok URL to automatically detect places and generate a travel itinerary.
+              </p>
+              <div className="flex gap-2">
+                <Input
+                  value={videoUrl}
+                  onChange={(e) => setVideoUrl(e.target.value)}
+                  placeholder="https://instagram.com/reel/... or https://tiktok.com/@..."
+                  disabled={analyzingVideo}
+                  className="flex-1"
+                />
+                <Button 
+                  onClick={analyzeVideo}
+                  disabled={!videoUrl.trim() || analyzingVideo}
+                >
+                  {analyzingVideo ? "Analyzing..." : "Analyze Video"}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+
+          {videoAnalysis && (
+            <>
+              <Card>
+                <CardHeader>
+                  <CardTitle>📍 Detected Locations</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {videoAnalysis.sceneDescription && (
+                    <div className="p-3 bg-muted rounded-lg">
+                      <p className="text-sm font-medium mb-1">Scene Description:</p>
+                      <p className="text-sm text-muted-foreground">{videoAnalysis.sceneDescription}</p>
+                    </div>
+                  )}
+                  {videoAnalysis.suggestedDestination && (
+                    <Badge variant="default" className="text-base px-3 py-1">
+                      🎯 Suggested Destination: {videoAnalysis.suggestedDestination}
+                    </Badge>
+                  )}
+                  {videoAnalysis.locations.length > 0 ? (
+                    <div className="space-y-2">
+                      {videoAnalysis.locations.map((location, idx) => (
+                        <div key={idx} className="p-3 border rounded-lg">
+                          <div className="flex items-start justify-between">
+                            <div className="flex-1">
+                              <h4 className="font-medium">{location.name}</h4>
+                              <p className="text-sm text-muted-foreground mt-1">{location.description}</p>
+                              <div className="flex gap-2 mt-2">
+                                <Badge variant="outline" className="text-xs">
+                                  {location.type}
+                                </Badge>
+                                <Badge variant="outline" className="text-xs">
+                                  {(location.confidence * 100).toFixed(0)}% confidence
+                                </Badge>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">No specific locations detected in the video.</p>
+                  )}
+                  {videoAnalysis.detectedText.length > 0 && (
+                    <div className="mt-4">
+                      <p className="text-sm font-medium mb-2">Detected Text:</p>
+                      <div className="flex flex-wrap gap-2">
+                        {videoAnalysis.detectedText.map((text, idx) => (
+                          <Badge key={idx} variant="secondary" className="text-xs">
+                            {text}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
+              {itineraryPlan && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle>🗺️ Generated Itinerary</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="grid grid-cols-2 gap-4 mb-4">
+                      <div>
+                        <p className="text-sm font-medium text-muted-foreground">Destination</p>
+                        <p className="text-lg font-semibold">{itineraryPlan.destination}</p>
+                      </div>
+                      <div>
+                        <p className="text-sm font-medium text-muted-foreground">Dates</p>
+                        <p className="text-lg font-semibold">{itineraryPlan.dates}</p>
+                      </div>
+                      <div>
+                        <p className="text-sm font-medium text-muted-foreground">Budget</p>
+                        <p className="text-lg font-semibold">{itineraryPlan.budget}</p>
+                      </div>
+                      <div>
+                        <p className="text-sm font-medium text-muted-foreground">Hotel</p>
+                        <p className="text-sm">{itineraryPlan.hotel.area} - {itineraryPlan.hotel.style}</p>
+                      </div>
+                    </div>
+
+                    <div className="space-y-4">
+                      <h3 className="font-semibold">Day-by-Day Itinerary</h3>
+                      {itineraryPlan.itinerary.map((day, idx) => (
+                        <div key={idx} className="p-4 border rounded-lg space-y-2">
+                          <h4 className="font-medium">Day {day.day}: {day.title}</h4>
+                          {day.morning.length > 0 && (
+                            <div>
+                              <p className="text-sm font-medium text-muted-foreground">🌅 Morning:</p>
+                              <ul className="text-sm list-disc list-inside ml-2">
+                                {day.morning.map((activity, i) => (
+                                  <li key={i}>{activity}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                          {day.afternoon.length > 0 && (
+                            <div>
+                              <p className="text-sm font-medium text-muted-foreground">☀️ Afternoon:</p>
+                              <ul className="text-sm list-disc list-inside ml-2">
+                                {day.afternoon.map((activity, i) => (
+                                  <li key={i}>{activity}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                          {day.evening.length > 0 && (
+                            <div>
+                              <p className="text-sm font-medium text-muted-foreground">🌙 Evening:</p>
+                              <ul className="text-sm list-disc list-inside ml-2">
+                                {day.evening.map((activity, i) => (
+                                  <li key={i}>{activity}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+
+                    {(itineraryPlan.booking_ctas.flight || itineraryPlan.booking_ctas.hotel || itineraryPlan.booking_ctas.activities) && (
+                      <div className="flex gap-2 pt-4 border-t">
+                        {itineraryPlan.booking_ctas.flight && (
+                          <Button size="sm" asChild>
+                            <a href={itineraryPlan.booking_ctas.flight} target="_blank" rel="noopener noreferrer">
+                              Book Flights
+                            </a>
+                          </Button>
+                        )}
+                        {itineraryPlan.booking_ctas.hotel && (
+                          <Button size="sm" variant="outline" asChild>
+                            <a href={itineraryPlan.booking_ctas.hotel} target="_blank" rel="noopener noreferrer">
+                              Book Hotel
+                            </a>
+                          </Button>
+                        )}
+                        {itineraryPlan.booking_ctas.activities && (
+                          <Button size="sm" variant="outline" asChild>
+                            <a href={itineraryPlan.booking_ctas.activities} target="_blank" rel="noopener noreferrer">
+                              Book Activities
+                            </a>
+                          </Button>
+                        )}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              )}
+            </>
+          )}
+        </TabsContent>
+      </Tabs>
 
       {error && (
         <p className="text-sm text-red-600 bg-red-50 p-3 rounded-lg">{error}</p>
