@@ -1,8 +1,36 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Features
+
+- ✈️ **Flight Search**: Find the best round-trip flights using natural language
+- 🗺️ **Activity Itinerary**: Generate personalized daily itineraries with local activities, attractions, and recommendations using Google Places API
+- 🤖 **AI-Powered**: Uses OpenAI to parse user requests and organize activities
+
 ## Getting Started
 
-First, run the development server:
+### Prerequisites
+
+You'll need API keys for:
+- **OpenAI API** (for parsing flight requests and organizing itineraries)
+- **Google Places API** (for finding local activities and attractions)
+
+### Environment Variables
+
+Create a `.env.local` file in the root directory with the following:
+
+```env
+OPENAI_API_KEY=your_openai_api_key_here
+GOOGLE_PLACES_API_KEY=your_google_places_api_key_here
+```
+
+To get a Google Places API key:
+1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+2. Create a new project or select an existing one
+3. Enable the "Places API" (New) or "Places API"
+4. Create credentials (API Key)
+5. Restrict the API key to "Places API" for security
+
+### Running the Development Server
 
 ```bash
 npm run dev

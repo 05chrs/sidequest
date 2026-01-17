@@ -47,6 +47,26 @@ interface ProcessedFlight {
   bookingUrl?: string;
 }
 
+interface Activity {
+  id: string;
+  name: string;
+  address: string;
+  rating?: number;
+  ratingCount?: number;
+  types: string[];
+  photoUrl?: string;
+  category: string;
+  time?: string;
+  duration?: string;
+  notes?: string;
+}
+
+interface DayItinerary {
+  day: number;
+  date: string;
+  activities: Activity[];
+}
+
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -60,6 +80,11 @@ export default function Home() {
   const [flights, setFlights] = useState<ProcessedFlight[]>([]);
   const [searchComplete, setSearchComplete] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [itinerary, setItinerary] = useState<DayItinerary[] | null>(null);
+  const [loadingItinerary, setLoadingItinerary] = useState(false);
+  const [itineraryError, setItineraryError] = useState<string | null>(null);
+  const [activityPreferences, setActivityPreferences] = useState("");
+  const [destinationName, setDestinationName] = useState<string | null>(null);
 
   async function parsePrompt(userMessage: string, previousData?: FlightParams) {
     const res = await fetch("/api/parse-flight", {
@@ -159,6 +184,60 @@ export default function Home() {
     doSubmit();
   }
 
+  async function generateItinerary() {
+    if (!flightParams?.arrival_airport_code || !flightParams?.arrival_date || !flightParams?.departure_date) {
+      setItineraryError("Missing flight information to generate itinerary");
+      return;
+    }
+
+    setLoadingItinerary(true);
+    setItineraryError(null);
+
+    try {
+      // Convert airport code to city name (simplified - in production, use a mapping)
+      const destination = flightParams.arrival_airport_code;
+      
+      // For activities, we need:
+      // - arrival_date: when you arrive at destination (use departure_date from flight search)
+      // - departure_date: when you leave destination (use arrival_date from flight search)
+      const res = await fetch("/api/activities", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          destination,
+          arrival_date: flightParams.departure_date, // When you leave origin = when you arrive at destination
+          departure_date: flightParams.arrival_date, // When you return to origin = when you leave destination
+          preferences: activityPreferences || undefined,
+        }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        const errorMsg = data?.error || "Failed to generate itinerary";
+        // Include debug info if available
+        if (data?.debug) {
+          console.error("Activities API debug info:", data.debug);
+        }
+        throw new Error(errorMsg);
+      }
+
+      const data = await res.json();
+      setItinerary(data.itinerary || []);
+      setDestinationName(data.destination || null);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: `Great! I've generated a ${data.days}-day itinerary for ${data.destination} with ${data.itinerary?.reduce((sum: number, day: DayItinerary) => sum + day.activities.length, 0) || 0} activities.`,
+        },
+      ]);
+    } catch (err: any) {
+      setItineraryError(err.message);
+    } finally {
+      setLoadingItinerary(false);
+    }
+  }
+
   function resetSearch() {
     setMessages([
       {
@@ -170,6 +249,10 @@ export default function Home() {
     setFlights([]);
     setSearchComplete(false);
     setError(null);
+    setItinerary(null);
+    setItineraryError(null);
+    setActivityPreferences("");
+    setDestinationName(null);
   }
 
   function formatDuration(minutes: number): string {
@@ -185,6 +268,12 @@ export default function Home() {
       date: d.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
       time: d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }),
     };
+  }
+
+  function formatDate(dateStr: string): string {
+    if (!dateStr) return "";
+    const d = new Date(dateStr);
+    return d.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
   }
 
   return (
@@ -335,6 +424,128 @@ export default function Home() {
             </Card>
           ))}
         </div>
+      )}
+
+      {/* Activities/Itinerary Section */}
+      {searchComplete && flightParams && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-lg">🗺️ Local Activities & Itinerary</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {!itinerary ? (
+              <>
+                <p className="text-sm text-muted-foreground">
+                  Generate a personalized itinerary with local activities, attractions, and recommendations for your destination.
+                </p>
+                <div className="space-y-2">
+                  <Input
+                    value={activityPreferences}
+                    onChange={(e) => setActivityPreferences(e.target.value)}
+                    placeholder="Preferences (e.g., 'museums and art galleries', 'outdoor activities', 'family-friendly')"
+                    className="w-full"
+                  />
+                  <Button 
+                    onClick={generateItinerary} 
+                    disabled={loadingItinerary}
+                    className="w-full"
+                  >
+                    {loadingItinerary ? "Generating Itinerary..." : "Generate Itinerary"}
+                  </Button>
+                </div>
+                {itineraryError && (
+                  <p className="text-sm text-red-600 bg-red-50 p-3 rounded-lg">{itineraryError}</p>
+                )}
+              </>
+            ) : (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-md font-semibold">
+                    {itinerary.length}-Day Itinerary for {destinationName || flightParams.arrival_airport_code}
+                  </h3>
+                  <Button 
+                    variant="outline" 
+                    size="sm" 
+                    onClick={() => {
+                      setItinerary(null);
+                      setActivityPreferences("");
+                    }}
+                  >
+                    Regenerate
+                  </Button>
+                </div>
+                {itinerary.map((day) => (
+                  <Card key={day.day} className="border-l-4 border-l-primary">
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-sm font-medium">
+                        Day {day.day} - {formatDate(day.date)}
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-3">
+                      {day.activities.map((activity, idx) => (
+                        <div key={activity.id || idx} className="flex gap-3 p-3 bg-muted/50 rounded-lg">
+                          {activity.photoUrl ? (
+                            <img 
+                              src={activity.photoUrl} 
+                              alt={activity.name}
+                              className="w-20 h-20 object-cover rounded"
+                              onError={(e) => {
+                                // Log error and hide image if it fails to load
+                                console.error(`Failed to load image for ${activity.name}:`, activity.photoUrl);
+                                (e.target as HTMLImageElement).style.display = 'none';
+                              }}
+                              onLoad={() => {
+                                console.log(`Successfully loaded image for ${activity.name}`);
+                              }}
+                            />
+                          ) : (
+                            <div className="w-20 h-20 bg-muted rounded flex items-center justify-center text-xs text-muted-foreground">
+                              No Image
+                            </div>
+                          )}
+                          <div className="flex-1 space-y-1">
+                            <div className="flex items-start justify-between">
+                              <div>
+                                <h4 className="font-medium text-sm">{activity.name}</h4>
+                                <p className="text-xs text-muted-foreground">{activity.address}</p>
+                              </div>
+                              <div className="text-right">
+                                {activity.time && (
+                                  <Badge variant="outline" className="text-xs">
+                                    {activity.time}
+                                  </Badge>
+                                )}
+                                {activity.duration && (
+                                  <Badge variant="secondary" className="text-xs ml-1">
+                                    {activity.duration}
+                                  </Badge>
+                                )}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <Badge variant="outline" className="text-xs">
+                                {activity.category}
+                              </Badge>
+                              {activity.rating && (
+                                <span className="text-xs text-muted-foreground">
+                                  ⭐ {activity.rating.toFixed(1)}
+                                  {activity.ratingCount && ` (${activity.ratingCount.toLocaleString()})`}
+                                </span>
+                              )}
+                            </div>
+                            {activity.notes && (
+                              <p className="text-xs text-muted-foreground italic">{activity.notes}</p>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
       )}
 
       {/* Input Form */}
