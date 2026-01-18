@@ -3,7 +3,7 @@ import { z } from "zod";
 
 const ParseRequest = z.object({
   prompt: z.string().min(3),
-  previousData: z.record(z.any()).optional(),
+  previousData: z.record(z.string(), z.any()).optional(),
 });
 
 // Required fields for FlightAPI round trip

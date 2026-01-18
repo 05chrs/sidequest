@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-const HOTEL_API_KEY = "696bf3c39a4234b73f7b59bb";
+const HOTEL_API_KEY = process.env.MAKCORPS_API_KEY || "696bf3c39a4234b73f7b59bb";
 
 // Fallback city IDs for common destinations (when API is rate-limited)
 const COMMON_CITIES: Record<string, { id: string; name: string }> = {
@@ -50,10 +50,8 @@ const COMMON_CITIES: Record<string, { id: string; name: string }> = {
 
 function findCityInFallback(name: string): { id: string; name: string } | null {
   const normalized = name.toLowerCase().trim();
-  if (COMMON_CITIES[normalized]) {
-    return COMMON_CITIES[normalized];
-  }
-  // Try partial match
+  if (COMMON_CITIES[normalized]) return COMMON_CITIES[normalized];
+
   for (const [key, value] of Object.entries(COMMON_CITIES)) {
     if (normalized.includes(key) || key.includes(normalized)) {
       return value;
@@ -63,6 +61,9 @@ function findCityInFallback(name: string): { id: string; name: string } | null {
 }
 
 export async function GET(req: Request) {
+  // ✅ declare outside so catch() can use it
+  let fallbackCity: { id: string; name: string } | null = null;
+
   try {
     const { searchParams } = new URL(req.url);
     const name = searchParams.get("name");
@@ -74,32 +75,39 @@ export async function GET(req: Request) {
       );
     }
 
-    // First check fallback for common cities
-    const fallbackCity = findCityInFallback(name);
+    // ✅ assign so catch() can use it
+    fallbackCity = findCityInFallback(name);
 
-    const url = `https://api.makcorps.com/mapping?api_key=${HOTEL_API_KEY}&name=${encodeURIComponent(name)}`;
-    
+    const url = `https://api.makcorps.com/mapping?api_key=${HOTEL_API_KEY}&name=${encodeURIComponent(
+      name
+    )}`;
+
     console.log("Calling Mapping API:", url);
 
     const response = await fetch(url, {
       method: "GET",
-      headers: { "Accept": "application/json" },
+      headers: { Accept: "application/json" },
     });
 
     if (!response.ok) {
       const errorText = await response.text();
       console.error("Mapping API error:", response.status, errorText);
-      
-      // Use fallback if API fails (rate limited, etc.)
+
       if (fallbackCity) {
         console.log("Using fallback city:", fallbackCity);
         return NextResponse.json({
-          cities: [{ id: fallbackCity.id, name: fallbackCity.name, displayName: fallbackCity.name }],
+          cities: [
+            {
+              id: fallbackCity.id,
+              name: fallbackCity.name,
+              displayName: fallbackCity.name,
+            },
+          ],
           hotels: [],
           fromFallback: true,
         });
       }
-      
+
       return NextResponse.json(
         { error: `Mapping API error: ${response.status}` },
         { status: response.status }
@@ -108,7 +116,6 @@ export async function GET(req: Request) {
 
     const data = await response.json();
 
-    // Filter for GEO (city) results and format them
     let cities = data
       .filter((item: any) => item.type === "GEO")
       .map((item: any) => ({
@@ -119,12 +126,16 @@ export async function GET(req: Request) {
         coords: item.coords,
       }));
 
-    // If no cities found from API but we have a fallback, use it
     if (cities.length === 0 && fallbackCity) {
-      cities = [{ id: fallbackCity.id, name: fallbackCity.name, displayName: fallbackCity.name }];
+      cities = [
+        {
+          id: fallbackCity.id,
+          name: fallbackCity.name,
+          displayName: fallbackCity.name,
+        },
+      ];
     }
 
-    // Also include hotels in case user wants a specific hotel
     const hotels = data
       .filter((item: any) => item.type === "HOTEL")
       .slice(0, 5)
@@ -142,22 +153,26 @@ export async function GET(req: Request) {
       hotels,
       raw: data,
     });
-  } catch (e: any) {
+  } catch (e) {
     console.error("City lookup error:", e);
-    
-    // Use fallback on any error
+
+    // ✅ now this works
     if (fallbackCity) {
       console.log("Using fallback city after error:", fallbackCity);
       return NextResponse.json({
-        cities: [{ id: fallbackCity.id, name: fallbackCity.name, displayName: fallbackCity.name }],
+        cities: [
+          {
+            id: fallbackCity.id,
+            name: fallbackCity.name,
+            displayName: fallbackCity.name,
+          },
+        ],
         hotels: [],
         fromFallback: true,
       });
     }
-    
-    return NextResponse.json(
-      { error: e.message || "Unknown error" },
-      { status: 500 }
-    );
+
+    const message = e instanceof Error ? e.message : "Unknown error";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
