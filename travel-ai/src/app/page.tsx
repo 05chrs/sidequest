@@ -1067,7 +1067,9 @@ export default function Home() {
         {/* Header */}
         <header className="sticky top-0 z-20 h-16 flex items-center justify-between px-6 bg-[#0a0a0a] border-b border-gray-800">
           <div className="flex items-center gap-3">
-            <img src="/logo.png" alt="Sidequest Logo" className="w-9 h-9 rounded-xl object-cover" />
+            <div className="w-9 h-9 bg-gradient-to-r from-blue-600 to-violet-400 rounded-xl flex items-center justify-center p-1.5">
+              <img src="/logo.png" alt="Sidequest Logo" className="w-full h-full object-contain" />
+            </div>
             <span className="text-base font-bold text-white">sidequest</span>
           </div>
           {(itineraryPlan || flightParams) && (
@@ -1087,7 +1089,7 @@ export default function Home() {
                 alt="Star" 
                 className="w-64 h-64 mx-auto mb-2"
               />
-              <h1 className="text-4xl font-bold text-white tracking-tight">tell me about your next git .</h1>
+              <h1 className="text-4xl font-bold text-white tracking-tight">tell me about your next sidequest.</h1>
               <p className="text-lg text-gray-400">describe your dream, and i'll make it a reality.</p>
             </div>
 
