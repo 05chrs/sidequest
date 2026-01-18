@@ -13,7 +13,7 @@ const FlightSearchRequest = z.object({
   currency: z.string().length(3),
 });
 
-const FLIGHT_API_KEY = "696bf16f33a065399aba7892";
+const FLIGHT_API_KEY = "696c238d33a065399aba87d5";
 
 export async function POST(req: Request) {
   try {
