@@ -56,6 +56,57 @@ interface VideoEntry {
   error?: string;
 }
 
+interface HotelResult {
+  name: string;
+  type: string;
+  description?: string;
+  link?: string;
+  thumbnail?: string;
+  rating: number;
+  reviews: number;
+  hotel_class?: number;
+  price: number;
+  price_formatted: string;
+  total_price?: number;
+  total_price_formatted?: string;
+  amenities: string[];
+}
+
+interface FlightResult {
+  id: string;
+  price: number;
+  currency: string;
+  outbound: {
+    departure: string;
+    arrival: string;
+    duration: number;
+    stops: number;
+    segments: Array<{
+      from: string;
+      to: string;
+      departure: string;
+      arrival: string;
+      carrier: string;
+      flightNumber: string;
+    }>;
+  };
+  return: {
+    departure: string;
+    arrival: string;
+    duration: number;
+    stops: number;
+    segments: Array<{
+      from: string;
+      to: string;
+      departure: string;
+      arrival: string;
+      carrier: string;
+      flightNumber: string;
+    }>;
+  };
+  bookingUrl?: string;
+}
+
 export default function Home() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -71,6 +122,14 @@ export default function Home() {
   const [itineraryPlan, setItineraryPlan] = useState<ItineraryPlan | null>(null);
   const [generatingItinerary, setGeneratingItinerary] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  
+  const [hotels, setHotels] = useState<HotelResult[]>([]);
+  const [loadingHotels, setLoadingHotels] = useState(false);
+  const [hotelsError, setHotelsError] = useState<string | null>(null);
+  
+  const [flights, setFlights] = useState<FlightResult[]>([]);
+  const [loadingFlights, setLoadingFlights] = useState(false);
+  const [flightsError, setFlightsError] = useState<string | null>(null);
 
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -129,15 +188,17 @@ export default function Home() {
         itineraryPrompt += `\nDates: ${parseResult.data.departure_date} to ${parseResult.data.arrival_date}`;
       }
       if (allLocations.length > 0) {
-        itineraryPrompt += `\n\nPlaces from travel videos to include:\n${allLocations.map((loc) => `- ${loc}`).join("\n")}`;
+        itineraryPrompt += `\n\n🎯 IMPORTANT - The user has added ${completedVideos.length} travel video(s) with ${allLocations.length} places that MUST be included in the itinerary:`;
+        itineraryPrompt += `\n${allLocations.map((loc, i) => `${i + 1}. ${loc}`).join("\n")}`;
+        itineraryPrompt += `\n\nYou MUST include ALL of these places in the day-by-day itinerary. These are places the user specifically wants to visit based on videos they've seen.`;
       }
       if (allCaptions.length > 0) {
-        itineraryPrompt += `\n\nContext from videos:\n${allCaptions.map((c, i) => `${i + 1}. "${c}"`).join("\n")}`;
+        itineraryPrompt += `\n\nContext from video captions:\n${allCaptions.map((c, i) => `Video ${i + 1}: "${c}"`).join("\n")}`;
       }
       if (activityPreferences.trim()) {
-        itineraryPrompt += `\n\nUser preferences: ${activityPreferences.trim()}`;
+        itineraryPrompt += `\n\nAdditional user preferences: ${activityPreferences.trim()}`;
       }
-      itineraryPrompt += "\n\nCreate a detailed day-by-day itinerary.";
+      itineraryPrompt += "\n\nCreate a detailed day-by-day itinerary that includes EVERY place from the videos, organized logically by location/neighborhood.";
 
       const planRes = await fetch("/api/plan", {
         method: "POST",
@@ -153,11 +214,102 @@ export default function Home() {
       const plan: ItineraryPlan = await planRes.json();
       setItineraryPlan(plan);
       setSidebarOpen(true);
+      
+      // Combine user prompt and activity preferences for filtering
+      const userPreferences = `${userMessage} ${activityPreferences}`.trim();
+      
+      // Fetch hotels in parallel if we have destination and dates
+      const hotelDestination = destination || plan.destination;
+      if (hotelDestination && parseResult.data?.departure_date && parseResult.data?.arrival_date) {
+        fetchHotels(hotelDestination, parseResult.data.departure_date, parseResult.data.arrival_date, parseResult.data.number_of_adults || 2, userPreferences);
+      }
+      
+      // Fetch flights if we have airport codes
+      if (parseResult.data?.departure_airport_code && parseResult.data?.arrival_airport_code) {
+        fetchFlights(parseResult.data, userPreferences);
+      }
     } catch (err: any) {
       setError(err.message);
     } finally {
       setLoading(false);
       setGeneratingItinerary(false);
+    }
+  }
+  
+  async function fetchFlights(params: FlightParams, preferences?: string) {
+    if (!params.departure_airport_code || !params.arrival_airport_code || !params.departure_date || !params.arrival_date) {
+      return;
+    }
+    
+    setLoadingFlights(true);
+    setFlightsError(null);
+    try {
+      // Determine cabin class from preferences
+      let cabinClass = "Economy";
+      if (preferences) {
+        const lower = preferences.toLowerCase();
+        if (/business\s*class/i.test(lower)) cabinClass = "Business";
+        else if (/first\s*class/i.test(lower)) cabinClass = "First";
+        else if (/premium\s*(economy)?/i.test(lower)) cabinClass = "Premium_Economy";
+      }
+      
+      const res = await fetch("/api/flights", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          departure_airport_code: params.departure_airport_code,
+          arrival_airport_code: params.arrival_airport_code,
+          departure_date: params.departure_date,
+          arrival_date: params.arrival_date,
+          number_of_adults: params.number_of_adults || 1,
+          number_of_children: 0,
+          number_of_infants: 0,
+          cabin_class: cabinClass,
+          currency: "USD",
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data?.error || "Failed to fetch flights");
+      }
+      const data = await res.json();
+      setFlights(data.flights || []);
+    } catch (err: any) {
+      console.error("Flights error:", err);
+      setFlightsError(err.message);
+    } finally {
+      setLoadingFlights(false);
+    }
+  }
+
+  async function fetchHotels(destination: string, checkIn: string, checkOut: string, adults: number, preferences?: string) {
+    setLoadingHotels(true);
+    setHotelsError(null);
+    try {
+      const res = await fetch("/api/hotels", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          destination: `${destination} hotels`,
+          check_in_date: checkIn,
+          check_out_date: checkOut,
+          adults,
+          children: 0,
+          currency: "USD",
+          preferences, // Pass user preferences for filtering (e.g., "no hostels", "luxury only")
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data?.error || "Failed to fetch hotels");
+      }
+      const data = await res.json();
+      setHotels(data.hotels || []);
+    } catch (err: any) {
+      console.error("Hotels error:", err);
+      setHotelsError(err.message);
+    } finally {
+      setLoadingHotels(false);
     }
   }
 
@@ -177,6 +329,10 @@ export default function Home() {
     setShowVideoInput(false);
     setShowPreferences(false);
     setSidebarOpen(false);
+    setHotels([]);
+    setHotelsError(null);
+    setFlights([]);
+    setFlightsError(null);
   }
 
   function addVideoUrl() {
@@ -212,6 +368,17 @@ export default function Home() {
   }
 
   const analyzingCount = videoEntries.filter((v) => v.status === "analyzing").length;
+  const completedVideos = videoEntries.filter((v) => v.status === "done" && v.analysis);
+  
+  // Collect all unique places from all videos
+  const allPlacesFromVideos: { name: string; videoIndex: number }[] = [];
+  completedVideos.forEach((video, videoIdx) => {
+    video.analysis?.locations.forEach((loc) => {
+      if (!allPlacesFromVideos.find(p => p.name === loc.name)) {
+        allPlacesFromVideos.push({ name: loc.name, videoIndex: videoIdx + 1 });
+      }
+    });
+  });
 
   return (
     <div className="min-h-screen flex" style={{ backgroundColor: '#f7f7f8' }}>
@@ -321,6 +488,230 @@ export default function Home() {
                       </div>
                     </div>
                   ))}
+                </div>
+
+                {/* Flights Section */}
+                <div className="pt-6 border-t border-gray-100">
+                  <div className="flex items-center gap-2 mb-4">
+                    <svg width="18" height="18" fill="none" stroke="#1a1a1a" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z"/>
+                    </svg>
+                    <h3 className="text-sm font-bold text-gray-900">Flight Options</h3>
+                  </div>
+                  
+                  {loadingFlights ? (
+                    <div className="space-y-3">
+                      {[1, 2, 3].map((i) => (
+                        <div key={i} className="p-3 rounded-xl border border-gray-100">
+                          <div className="space-y-2">
+                            <div className="h-4 w-3/4 rounded shimmer-bg" />
+                            <div className="h-3 w-1/2 rounded shimmer-bg" />
+                            <div className="h-4 w-1/4 rounded shimmer-bg" />
+                          </div>
+                        </div>
+                      ))}
+                      <div className="flex items-center gap-2 pt-2">
+                        <div className="flex gap-1">
+                          {[0, 1, 2].map((i) => (
+                            <span key={i} className="w-1.5 h-1.5 bg-gray-600 rounded-full" style={{ animation: `bounce-dot 1.4s infinite ease-in-out ${i * 0.16}s` }} />
+                          ))}
+                        </div>
+                        <span className="text-xs text-gray-500">Searching flights...</span>
+                      </div>
+                    </div>
+                  ) : flightsError ? (
+                    <div className="p-3 rounded-xl bg-red-50 border border-red-100">
+                      <p className="text-xs text-red-600">{flightsError}</p>
+                    </div>
+                  ) : flights.length > 0 ? (
+                    <div className="space-y-3">
+                      {flights.slice(0, 5).map((flight, idx) => (
+                        <a
+                          key={flight.id || idx}
+                          href={flight.bookingUrl || "#"}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="block p-3 rounded-xl border border-gray-100 hover:border-gray-200 hover:shadow-sm transition-all"
+                        >
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="text-lg font-bold text-emerald-600">${flight.price}</span>
+                            <span className="text-[10px] text-gray-400">roundtrip</span>
+                          </div>
+                          
+                          {/* Outbound */}
+                          <div className="space-y-1 mb-2">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] font-medium text-gray-400 w-10">OUT</span>
+                              <span className="text-xs font-semibold text-gray-900">
+                                {flight.outbound.segments?.[0]?.from || "—"} → {flight.outbound.segments?.[flight.outbound.segments.length - 1]?.to || "—"}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-3 pl-12">
+                              <span className="text-[10px] text-gray-500">
+                                {flight.outbound.departure ? new Date(flight.outbound.departure).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : "—"}
+                              </span>
+                              <span className="text-[10px] text-gray-400">
+                                {Math.floor((flight.outbound.duration || 0) / 60)}h {(flight.outbound.duration || 0) % 60}m
+                              </span>
+                              <span className="text-[10px] text-gray-400">
+                                {flight.outbound.stops === 0 ? "Nonstop" : `${flight.outbound.stops} stop${flight.outbound.stops > 1 ? 's' : ''}`}
+                              </span>
+                            </div>
+                          </div>
+                          
+                          {/* Return */}
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] font-medium text-gray-400 w-10">RET</span>
+                              <span className="text-xs font-semibold text-gray-900">
+                                {flight.return.segments?.[0]?.from || "—"} → {flight.return.segments?.[flight.return.segments.length - 1]?.to || "—"}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-3 pl-12">
+                              <span className="text-[10px] text-gray-500">
+                                {flight.return.departure ? new Date(flight.return.departure).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : "—"}
+                              </span>
+                              <span className="text-[10px] text-gray-400">
+                                {Math.floor((flight.return.duration || 0) / 60)}h {(flight.return.duration || 0) % 60}m
+                              </span>
+                              <span className="text-[10px] text-gray-400">
+                                {flight.return.stops === 0 ? "Nonstop" : `${flight.return.stops} stop${flight.return.stops > 1 ? 's' : ''}`}
+                              </span>
+                            </div>
+                          </div>
+                          
+                          {flight.outbound.segments?.[0]?.carrier && (
+                            <p className="text-[10px] text-gray-400 mt-2 pt-2 border-t border-gray-50">
+                              {flight.outbound.segments[0].carrier}
+                            </p>
+                          )}
+                        </a>
+                      ))}
+                      {flights.length > 5 && (
+                        <p className="text-xs text-center text-gray-400 pt-2">
+                          +{flights.length - 5} more flights available
+                        </p>
+                      )}
+                    </div>
+                  ) : flightParams?.departure_airport_code ? (
+                    <div className="p-4 rounded-xl bg-gray-50 border border-gray-100 text-center">
+                      <p className="text-xs text-gray-500">No flights found for these dates</p>
+                    </div>
+                  ) : (
+                    <div className="p-4 rounded-xl bg-gray-50 border border-gray-100 text-center">
+                      <p className="text-xs text-gray-500">Add your departure city to see flight prices</p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Hotels Section */}
+                <div className="pt-6 border-t border-gray-100">
+                  <div className="flex items-center gap-2 mb-4">
+                    <svg width="18" height="18" fill="none" stroke="#1a1a1a" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M3 7v11a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7"/><path d="M21 7H3l2-4h14l2 4Z"/><path d="M8 11h8v6H8z"/>
+                    </svg>
+                    <h3 className="text-sm font-bold text-gray-900">Recommended Hotels</h3>
+                  </div>
+                  
+                  {loadingHotels ? (
+                    <div className="space-y-3">
+                      {[1, 2, 3].map((i) => (
+                        <div key={i} className="p-3 rounded-xl border border-gray-100">
+                          <div className="flex gap-3">
+                            <div className="w-16 h-16 rounded-lg shimmer-bg" />
+                            <div className="flex-1 space-y-2">
+                              <div className="h-4 w-3/4 rounded shimmer-bg" />
+                              <div className="h-3 w-1/2 rounded shimmer-bg" />
+                              <div className="h-4 w-1/4 rounded shimmer-bg" />
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                      <div className="flex items-center gap-2 pt-2">
+                        <div className="flex gap-1">
+                          {[0, 1, 2].map((i) => (
+                            <span key={i} className="w-1.5 h-1.5 bg-gray-600 rounded-full" style={{ animation: `bounce-dot 1.4s infinite ease-in-out ${i * 0.16}s` }} />
+                          ))}
+                        </div>
+                        <span className="text-xs text-gray-500">Finding best hotels...</span>
+                      </div>
+                    </div>
+                  ) : hotelsError ? (
+                    <div className="p-3 rounded-xl bg-red-50 border border-red-100">
+                      <p className="text-xs text-red-600">{hotelsError}</p>
+                    </div>
+                  ) : hotels.length > 0 ? (
+                    <div className="space-y-3">
+                      {hotels.slice(0, 5).map((hotel, idx) => (
+                        <a
+                          key={idx}
+                          href={hotel.link || "#"}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="block p-3 rounded-xl border border-gray-100 hover:border-gray-200 hover:shadow-sm transition-all"
+                        >
+                          <div className="flex gap-3">
+                            {hotel.thumbnail ? (
+                              <img
+                                src={hotel.thumbnail}
+                                alt={hotel.name}
+                                className="w-16 h-16 rounded-lg object-cover bg-gray-100"
+                              />
+                            ) : (
+                              <div className="w-16 h-16 rounded-lg bg-gray-100 flex items-center justify-center">
+                                <svg width="20" height="20" fill="none" stroke="#999" strokeWidth="1.5">
+                                  <path d="M3 7v11a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7"/><path d="M21 7H3l2-4h14l2 4Z"/>
+                                </svg>
+                              </div>
+                            )}
+                            <div className="flex-1 min-w-0">
+                              <h4 className="text-sm font-semibold text-gray-900 truncate">{hotel.name}</h4>
+                              <div className="flex items-center gap-2 mt-0.5">
+                                {hotel.rating > 0 && (
+                                  <div className="flex items-center gap-1">
+                                    <svg width="12" height="12" fill="#facc15" stroke="#facc15" strokeWidth="1">
+                                      <polygon points="12,2 15,9 22,9 17,14 19,21 12,17 5,21 7,14 2,9 9,9"/>
+                                    </svg>
+                                    <span className="text-xs font-medium text-gray-600">{hotel.rating.toFixed(1)}</span>
+                                  </div>
+                                )}
+                                {hotel.hotel_class && (
+                                  <span className="text-[10px] text-gray-400">{hotel.hotel_class}-star</span>
+                                )}
+                              </div>
+                              <div className="flex items-center justify-between mt-1.5">
+                                <span className="text-sm font-bold text-emerald-600">{hotel.price_formatted}</span>
+                                <span className="text-[10px] text-gray-400">/night</span>
+                              </div>
+                            </div>
+                          </div>
+                          {hotel.amenities.length > 0 && (
+                            <div className="flex flex-wrap gap-1 mt-2">
+                              {hotel.amenities.slice(0, 4).map((amenity, i) => (
+                                <span key={i} className="px-1.5 py-0.5 text-[9px] font-medium bg-gray-100 text-gray-500 rounded">
+                                  {amenity}
+                                </span>
+                              ))}
+                              {hotel.amenities.length > 4 && (
+                                <span className="px-1.5 py-0.5 text-[9px] font-medium text-gray-400">
+                                  +{hotel.amenities.length - 4} more
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </a>
+                      ))}
+                      {hotels.length > 5 && (
+                        <p className="text-xs text-center text-gray-400 pt-2">
+                          +{hotels.length - 5} more hotels available
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="p-4 rounded-xl bg-gray-50 border border-gray-100 text-center">
+                      <p className="text-xs text-gray-500">No hotels found for these dates</p>
+                    </div>
+                  )}
                 </div>
               </div>
             ) : null}
@@ -432,11 +823,21 @@ export default function Home() {
             {/* Video Input Panel */}
             {showVideoInput && (
               <div className="bg-white rounded-2xl p-6 space-y-4" style={{ boxShadow: '0 0 0 1px rgba(0,0,0,0.05), 0 4px 12px rgba(0,0,0,0.06)' }}>
-                <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 bg-gray-100 rounded-lg flex items-center justify-center">
-                    <svg width="16" height="16" fill="none" stroke="#666" strokeWidth="2"><path d="m22 8-6 4 6 4V8Z"/><rect width="14" height="12" x="2" y="6" rx="2"/></svg>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 bg-gray-100 rounded-lg flex items-center justify-center">
+                      <svg width="16" height="16" fill="none" stroke="#666" strokeWidth="2"><path d="m22 8-6 4 6 4V8Z"/><rect width="14" height="12" x="2" y="6" rx="2"/></svg>
+                    </div>
+                    <div>
+                      <span className="text-sm font-bold text-gray-800">Add travel videos</span>
+                      <p className="text-xs text-gray-500">Add as many as you want - all places will be included</p>
+                    </div>
                   </div>
-                  <span className="text-sm font-bold text-gray-800">Add videos for inspiration</span>
+                  {videoEntries.length > 0 && (
+                    <span className="px-2.5 py-1 text-xs font-bold bg-gray-900 text-white rounded-full">
+                      {videoEntries.length}
+                    </span>
+                  )}
                 </div>
                 
                 <div className="flex gap-3">
@@ -460,41 +861,79 @@ export default function Home() {
                 </div>
 
                 {videoEntries.length > 0 && (
-                  <div className="space-y-2 pt-2">
-                    {videoEntries.map((video) => (
+                  <div className="space-y-3 pt-2">
+                    {videoEntries.map((video, idx) => (
                       <div 
                         key={video.id}
-                        className={`flex items-start justify-between p-4 rounded-xl ${
+                        className={`p-4 rounded-xl ${
                           video.status === "error" ? "bg-red-50 border border-red-100" :
                           video.status === "done" ? "bg-emerald-50 border border-emerald-100" :
                           "bg-blue-50 border border-blue-100"
                         }`}
                       >
-                        <div className="flex-1 min-w-0 space-y-2">
-                          <p className="text-xs font-mono text-gray-600 truncate">{video.url}</p>
-                          {video.status === "analyzing" && (
-                            <div className="flex items-center gap-2">
-                              <div className="flex gap-1">
-                                {[0, 1, 2].map((i) => (
-                                  <span key={i} className="w-1.5 h-1.5 bg-blue-500 rounded-full" style={{ animation: `bounce-dot 1.4s infinite ease-in-out ${i * 0.16}s` }} />
-                                ))}
+                        <div className="flex items-start justify-between">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-2">
+                              <span className="w-5 h-5 flex items-center justify-center bg-gray-900 text-white text-[10px] font-bold rounded-full">{idx + 1}</span>
+                              <p className="text-xs font-mono text-gray-500 truncate">{video.url}</p>
+                            </div>
+                            {video.status === "analyzing" && (
+                              <div className="flex items-center gap-2 mt-2">
+                                <div className="flex gap-1">
+                                  {[0, 1, 2].map((i) => (
+                                    <span key={i} className="w-1.5 h-1.5 bg-blue-500 rounded-full" style={{ animation: `bounce-dot 1.4s infinite ease-in-out ${i * 0.16}s` }} />
+                                  ))}
+                                </div>
+                                <span className="text-xs font-semibold text-blue-600">Detecting places...</span>
                               </div>
-                              <span className="text-xs font-semibold text-blue-600">Analyzing...</span>
-                            </div>
-                          )}
-                          {video.status === "done" && video.analysis?.suggestedDestination && (
-                            <div className="flex items-center gap-2">
-                              <svg width="14" height="14" fill="none" stroke="#059669" strokeWidth="2"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>
-                              <span className="text-xs font-bold text-emerald-700">{video.analysis.suggestedDestination}</span>
-                            </div>
-                          )}
-                          {video.status === "error" && <span className="text-xs font-semibold text-red-600">{video.error}</span>}
+                            )}
+                            {video.status === "done" && video.analysis && (
+                              <div className="space-y-2 mt-2">
+                                {video.analysis.suggestedDestination && (
+                                  <div className="flex items-center gap-1.5">
+                                    <svg width="12" height="12" fill="none" stroke="#059669" strokeWidth="2.5"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>
+                                    <span className="text-xs font-bold text-emerald-700">{video.analysis.suggestedDestination}</span>
+                                  </div>
+                                )}
+                                {video.analysis.locations.length > 0 && (
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {video.analysis.locations.map((loc, i) => (
+                                      <span key={i} className="px-2 py-1 text-[11px] font-medium bg-white text-gray-700 rounded-md border border-emerald-200">
+                                        {loc.name}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                                {video.analysis.locations.length === 0 && !video.analysis.suggestedDestination && (
+                                  <span className="text-xs text-gray-500">No specific places detected</span>
+                                )}
+                              </div>
+                            )}
+                            {video.status === "error" && <span className="text-xs font-semibold text-red-600 mt-2 block">{video.error}</span>}
+                          </div>
+                          <button onClick={() => removeVideo(video.id)} className="ml-3 w-7 h-7 flex items-center justify-center text-gray-400 hover:text-red-500 hover:bg-white rounded-lg transition-colors">
+                            <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+                          </button>
                         </div>
-                        <button onClick={() => removeVideo(video.id)} className="ml-3 w-8 h-8 flex items-center justify-center text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors">
-                          <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
-                        </button>
                       </div>
                     ))}
+                  </div>
+                )}
+
+                {/* Summary of all places */}
+                {allPlacesFromVideos.length > 0 && (
+                  <div className="pt-4 border-t border-gray-100">
+                    <div className="flex items-center gap-2 mb-3">
+                      <svg width="14" height="14" fill="none" stroke="#059669" strokeWidth="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/></svg>
+                      <span className="text-xs font-bold text-emerald-700 uppercase tracking-wide">{allPlacesFromVideos.length} places will be included</span>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {allPlacesFromVideos.map((place, i) => (
+                        <span key={i} className="px-2.5 py-1 text-xs font-medium bg-emerald-100 text-emerald-800 rounded-full">
+                          {place.name}
+                        </span>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
@@ -512,9 +951,12 @@ export default function Home() {
                 <textarea
                   value={activityPreferences}
                   onChange={(e) => setActivityPreferences(e.target.value)}
-                  placeholder="I love trying local street food, visiting museums, and finding hidden gems..."
+                  placeholder="I love trying local street food, visiting museums, no hostels, prefer 4-star hotels..."
                   className="w-full h-28 px-4 py-3 text-sm bg-gray-50 rounded-xl border border-gray-200 placeholder-gray-400 resize-none focus:border-gray-400 focus:bg-white focus:outline-none transition-colors"
                 />
+                <p className="text-[10px] text-gray-400 mt-2">
+                  Tip: Add hotel preferences like "no hostels", "luxury only", or "budget-friendly"
+                </p>
               </div>
             )}
 
