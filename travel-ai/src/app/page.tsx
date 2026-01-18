@@ -107,6 +107,26 @@ interface FlightResult {
   bookingUrl?: string;
 }
 
+interface ActivityPrice {
+  name: string;
+  searchQuery: string;
+  price: number | null;
+  price_formatted: string;
+  source: string;
+  link?: string;
+  thumbnail?: string;
+  rating?: number;
+  reviews?: number;
+  duration?: string;
+  description?: string;
+}
+
+interface TripSelection {
+  flight: FlightResult | null;
+  hotel: HotelResult | null;
+  activities: Map<string, ActivityPrice>; // key: "day-timeOfDay-index"
+}
+
 export default function Home() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -130,6 +150,18 @@ export default function Home() {
   const [flights, setFlights] = useState<FlightResult[]>([]);
   const [loadingFlights, setLoadingFlights] = useState(false);
   const [flightsError, setFlightsError] = useState<string | null>(null);
+  
+  const [activityPrices, setActivityPrices] = useState<Map<string, ActivityPrice>>(new Map());
+  const [loadingActivities, setLoadingActivities] = useState(false);
+  
+  // Selection state for trip cost calculation
+  const [selectedFlight, setSelectedFlight] = useState<FlightResult | null>(null);
+  const [selectedHotel, setSelectedHotel] = useState<HotelResult | null>(null);
+  const [selectedActivities, setSelectedActivities] = useState<Set<string>>(new Set()); // Set of activity keys
+  
+  // City image for sidebar header
+  const [cityImage, setCityImage] = useState<string | null>(null);
+  const [loadingCityImage, setLoadingCityImage] = useState(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -228,6 +260,12 @@ export default function Home() {
       if (parseResult.data?.departure_airport_code && parseResult.data?.arrival_airport_code) {
         fetchFlights(parseResult.data, userPreferences);
       }
+      
+      // Fetch activity prices for the itinerary
+      fetchActivityPrices(plan);
+      
+      // Fetch city image for sidebar
+      fetchCityImage(plan.destination);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -313,6 +351,125 @@ export default function Home() {
     }
   }
 
+  async function fetchCityImage(city: string) {
+    setLoadingCityImage(true);
+    setCityImage(null);
+    try {
+      const res = await fetch("/api/city-image", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ city }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.imageUrl) {
+          setCityImage(data.imageUrl);
+        }
+      }
+    } catch (err) {
+      console.error("City image error:", err);
+    } finally {
+      setLoadingCityImage(false);
+    }
+  }
+
+  async function fetchActivityPrices(plan: ItineraryPlan) {
+    setLoadingActivities(true);
+    
+    // Collect all unique activities from the itinerary
+    const allActivities: { key: string; name: string }[] = [];
+    
+    for (const day of plan.itinerary) {
+      ["morning", "afternoon", "evening"].forEach((timeOfDay) => {
+        const activities = day[timeOfDay as keyof typeof day] as string[];
+        if (Array.isArray(activities)) {
+          activities.forEach((activity, idx) => {
+            const key = `${day.day}-${timeOfDay}-${idx}`;
+            // Skip very generic activities
+            if (activity.length > 5 && !allActivities.find(a => a.name === activity)) {
+              allActivities.push({ key, name: activity });
+            }
+          });
+        }
+      });
+    }
+
+    try {
+      // Fetch prices in batches of 10 to avoid overwhelming the API
+      const batchSize = 10;
+      const newPrices = new Map<string, ActivityPrice>();
+      
+      for (let i = 0; i < allActivities.length; i += batchSize) {
+        const batch = allActivities.slice(i, i + batchSize);
+        const res = await fetch("/api/activities", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            destination: plan.destination,
+            activities: batch.map(a => a.name),
+          }),
+        });
+        
+        if (res.ok) {
+          const data = await res.json();
+          if (data.activities) {
+            data.activities.forEach((actPrice: ActivityPrice, idx: number) => {
+              const actItem = batch[idx];
+              if (actItem) {
+                newPrices.set(actItem.key, actPrice);
+              }
+            });
+          }
+        }
+      }
+      
+      setActivityPrices(newPrices);
+    } catch (err) {
+      console.error("Activity prices error:", err);
+    } finally {
+      setLoadingActivities(false);
+    }
+  }
+
+  // Calculate total trip cost based on selections
+  function calculateTotalCost(): { flights: number; hotel: number; activities: number; total: number; nights: number } {
+    let flightsCost = selectedFlight?.price || 0;
+    let hotelCost = 0;
+    let activitiesCost = 0;
+    const nights = itineraryPlan?.hotel?.nights || (itineraryPlan?.itinerary?.length ? itineraryPlan.itinerary.length - 1 : 0) || 1;
+    
+    if (selectedHotel) {
+      hotelCost = selectedHotel.price * nights;
+    }
+    
+    selectedActivities.forEach((key) => {
+      const activity = activityPrices.get(key);
+      if (activity?.price) {
+        activitiesCost += activity.price;
+      }
+    });
+    
+    return {
+      flights: flightsCost,
+      hotel: hotelCost,
+      activities: activitiesCost,
+      total: flightsCost + hotelCost + activitiesCost,
+      nights,
+    };
+  }
+
+  function toggleActivitySelection(key: string) {
+    setSelectedActivities((prev) => {
+      const newSet = new Set(prev);
+      if (newSet.has(key)) {
+        newSet.delete(key);
+      } else {
+        newSet.add(key);
+      }
+      return newSet;
+    });
+  }
+
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     parseAndGenerateItinerary();
@@ -333,6 +490,11 @@ export default function Home() {
     setHotelsError(null);
     setFlights([]);
     setFlightsError(null);
+    setActivityPrices(new Map());
+    setSelectedFlight(null);
+    setSelectedHotel(null);
+    setSelectedActivities(new Set());
+    setCityImage(null);
   }
 
   function addVideoUrl() {
@@ -381,19 +543,19 @@ export default function Home() {
   });
 
   return (
-    <div className="min-h-screen flex" style={{ backgroundColor: '#f7f7f8' }}>
+    <div className="min-h-screen flex" style={{ backgroundColor: '#0a0a0a' }}>
       {/* Sidebar */}
       <aside 
-        className={`fixed left-0 top-0 h-full bg-white z-30 transition-all duration-300 ease-out overflow-hidden ${sidebarOpen ? 'w-[380px]' : 'w-0'}`}
-        style={{ boxShadow: sidebarOpen ? '4px 0 24px rgba(0,0,0,0.12)' : 'none' }}
+        className={`fixed left-0 top-0 h-full bg-[#111111] z-30 transition-all duration-300 ease-out overflow-hidden ${sidebarOpen ? 'w-[380px]' : 'w-0'}`}
+        style={{ boxShadow: sidebarOpen ? '4px 0 24px rgba(0,0,0,0.5)' : 'none' }}
       >
         <div className="w-[380px] h-full flex flex-col">
           {/* Sidebar Header */}
-          <div className="flex items-center justify-between h-16 px-6 border-b border-gray-100">
-            <span className="text-xs font-semibold text-gray-500 uppercase tracking-widest">Your Itinerary</span>
+          <div className="flex items-center justify-between h-16 px-6 border-b border-gray-800">
+            <span className="text-xs font-semibold text-gray-400 uppercase tracking-widest">Your Itinerary</span>
             <button 
               onClick={() => setSidebarOpen(false)}
-              className="w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
+              className="w-8 h-8 flex items-center justify-center rounded-lg text-gray-500 hover:text-gray-300 hover:bg-gray-800 transition-colors"
             >
               <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
             </button>
@@ -416,213 +578,298 @@ export default function Home() {
                 <div className="flex items-center gap-3 pt-4">
                   <div className="flex gap-1">
                     {[0, 1, 2].map((i) => (
-                      <span key={i} className="w-2 h-2 bg-gray-800 rounded-full" style={{ animation: `bounce-dot 1.4s infinite ease-in-out ${i * 0.16}s` }} />
+                      <span key={i} className="w-2 h-2 bg-gradient-to-r from-blue-600 to-violet-400 rounded-full" style={{ animation: `bounce-dot 1.4s infinite ease-in-out ${i * 0.16}s` }} />
                     ))}
                   </div>
-                  <span className="text-sm text-gray-500">Creating your itinerary...</span>
+                  <span className="text-sm text-gray-400">Creating your itinerary...</span>
                 </div>
               </div>
             ) : itineraryPlan ? (
               <div className="space-y-6">
-                {/* Summary Card */}
-                <div className="p-5 rounded-2xl bg-gradient-to-br from-gray-50 to-gray-100 border border-gray-100">
-                  <h3 className="text-xl font-bold text-gray-900">{itineraryPlan.destination}</h3>
-                  <p className="text-sm text-gray-500 mt-1">{itineraryPlan.dates}</p>
+                {/* City Image & Summary Card */}
+                <div className="rounded-2xl overflow-hidden border border-gray-800">
+                  {/* City Image */}
+                  <div className="relative h-40 bg-gradient-to-br from-gray-800 to-gray-900">
+                    {loadingCityImage ? (
+                      <div className="absolute inset-0 shimmer-bg-dark" />
+                    ) : cityImage ? (
+                      <img 
+                        src={cityImage} 
+                        alt={itineraryPlan.destination}
+                        className="absolute inset-0 w-full h-full object-cover"
+                        onError={(e) => {
+                          // Hide image on error, show gradient fallback
+                          (e.target as HTMLImageElement).style.display = 'none';
+                        }}
+                      />
+                    ) : (
+                      <div className="absolute inset-0 bg-gradient-to-br from-blue-600 to-violet-500" />
+                    )}
+                    {/* Gradient overlay for text readability */}
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/30 to-transparent" />
+                    {/* Destination name overlay */}
+                    <div className="absolute bottom-0 left-0 right-0 p-4">
+                      <h3 className="text-xl font-bold text-white drop-shadow-lg">{itineraryPlan.destination}</h3>
+                      <p className="text-sm text-white/90 mt-0.5">{itineraryPlan.dates}</p>
+                    </div>
+                  </div>
+                  {/* Budget badge */}
                   {itineraryPlan.budget && (
-                    <span className="inline-block mt-3 px-3 py-1 text-xs font-semibold text-gray-600 bg-white rounded-full border border-gray-200">
-                      {itineraryPlan.budget}
-                    </span>
+                    <div className="px-4 py-3 bg-[#1a1a1a]">
+                      <span className="inline-block px-3 py-1 text-xs font-semibold text-gray-300 bg-gray-800 rounded-full border border-gray-700">
+                        {itineraryPlan.budget}
+                      </span>
+                    </div>
                   )}
                 </div>
 
                 {/* Days */}
                 <div className="space-y-6">
-                  {itineraryPlan.itinerary.map((day) => (
-                    <div key={day.day} className="space-y-3">
-                      <div className="flex items-center gap-3">
-                        <span className="w-8 h-8 flex items-center justify-center bg-gray-900 text-white text-xs font-bold rounded-full">
-                          {day.day}
-                        </span>
-                        <h4 className="text-sm font-bold text-gray-900">{day.title}</h4>
+                  {itineraryPlan.itinerary.map((day) => {
+                    const renderActivityItem = (item: string, timeOfDay: string, idx: number) => {
+                      const key = `${day.day}-${timeOfDay}-${idx}`;
+                      const priceInfo = activityPrices.get(key);
+                      const isSelected = selectedActivities.has(key);
+                      
+                      return (
+                        <li 
+                          key={idx} 
+                          className={`text-sm text-gray-300 flex items-start gap-2 p-2 -mx-2 rounded-lg cursor-pointer transition-all ${
+                            isSelected ? "bg-violet-900/30" : "hover:bg-gray-800/50"
+                          }`}
+                          onClick={() => toggleActivitySelection(key)}
+                        >
+                          <div className={`w-4 h-4 mt-0.5 rounded border flex items-center justify-center shrink-0 transition-colors ${
+                            isSelected 
+                              ? "border-violet-400 bg-gradient-to-r from-blue-600 to-violet-400" 
+                              : "border-gray-600"
+                          }`}>
+                            {isSelected && (
+                              <svg width="10" height="10" fill="none" stroke="white" strokeWidth="2.5">
+                                <path d="M1.5 5l2 2 4-4.5" />
+                              </svg>
+                            )}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <span className={isSelected ? "text-violet-300" : ""}>{item}</span>
+                            {priceInfo && (
+                              <span className={`ml-2 text-xs font-medium ${
+                                priceInfo.price === 0 ? "text-gray-500" :
+                                priceInfo.price === null ? "text-gray-500" :
+                                isSelected ? "text-violet-300" : "text-violet-400"
+                              }`}>
+                                {priceInfo.price_formatted}
+                              </span>
+                            )}
+                            {loadingActivities && !priceInfo && (
+                              <span className="ml-2 inline-block w-10 h-3 rounded shimmer-bg-dark" />
+                            )}
+                          </div>
+                        </li>
+                      );
+                    };
+
+                    return (
+                      <div key={day.day} className="space-y-3">
+                        <div className="flex items-center gap-3">
+                          <span className="w-8 h-8 flex items-center justify-center bg-gradient-to-r from-blue-600 to-violet-400 text-white text-xs font-bold rounded-full">
+                            {day.day}
+                          </span>
+                          <h4 className="text-sm font-bold text-white">{day.title}</h4>
+                        </div>
+                        <div className="ml-11 space-y-4">
+                          {day.morning.length > 0 && (
+                            <div>
+                              <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-2">Morning</p>
+                              <ul className="space-y-1">
+                                {day.morning.map((item, i) => renderActivityItem(item, "morning", i))}
+                              </ul>
+                            </div>
+                          )}
+                          {day.afternoon.length > 0 && (
+                            <div>
+                              <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-2">Afternoon</p>
+                              <ul className="space-y-1">
+                                {day.afternoon.map((item, i) => renderActivityItem(item, "afternoon", i))}
+                              </ul>
+                            </div>
+                          )}
+                          {day.evening.length > 0 && (
+                            <div>
+                              <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-2">Evening</p>
+                              <ul className="space-y-1">
+                                {day.evening.map((item, i) => renderActivityItem(item, "evening", i))}
+                              </ul>
+                            </div>
+                          )}
+                        </div>
                       </div>
-                      <div className="ml-11 space-y-4">
-                        {day.morning.length > 0 && (
-                          <div>
-                            <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">Morning</p>
-                            <ul className="space-y-1.5">
-                              {day.morning.map((item, i) => (
-                                <li key={i} className="text-sm text-gray-600 flex gap-2">
-                                  <span className="w-1.5 h-1.5 bg-gray-300 rounded-full mt-2 shrink-0" />
-                                  {item}
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-                        {day.afternoon.length > 0 && (
-                          <div>
-                            <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">Afternoon</p>
-                            <ul className="space-y-1.5">
-                              {day.afternoon.map((item, i) => (
-                                <li key={i} className="text-sm text-gray-600 flex gap-2">
-                                  <span className="w-1.5 h-1.5 bg-gray-300 rounded-full mt-2 shrink-0" />
-                                  {item}
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-                        {day.evening.length > 0 && (
-                          <div>
-                            <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">Evening</p>
-                            <ul className="space-y-1.5">
-                              {day.evening.map((item, i) => (
-                                <li key={i} className="text-sm text-gray-600 flex gap-2">
-                                  <span className="w-1.5 h-1.5 bg-gray-300 rounded-full mt-2 shrink-0" />
-                                  {item}
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
 
                 {/* Flights Section */}
-                <div className="pt-6 border-t border-gray-100">
+                <div className="pt-6 border-t border-gray-800">
                   <div className="flex items-center gap-2 mb-4">
-                    <svg width="18" height="18" fill="none" stroke="#1a1a1a" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <svg width="18" height="18" fill="none" stroke="#a78bfa" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z"/>
                     </svg>
-                    <h3 className="text-sm font-bold text-gray-900">Flight Options</h3>
+                    <h3 className="text-sm font-bold text-white">Flight Options</h3>
                   </div>
                   
                   {loadingFlights ? (
                     <div className="space-y-3">
                       {[1, 2, 3].map((i) => (
-                        <div key={i} className="p-3 rounded-xl border border-gray-100">
+                        <div key={i} className="p-3 rounded-xl border border-gray-800">
                           <div className="space-y-2">
-                            <div className="h-4 w-3/4 rounded shimmer-bg" />
-                            <div className="h-3 w-1/2 rounded shimmer-bg" />
-                            <div className="h-4 w-1/4 rounded shimmer-bg" />
+                            <div className="h-4 w-3/4 rounded shimmer-bg-dark" />
+                            <div className="h-3 w-1/2 rounded shimmer-bg-dark" />
+                            <div className="h-4 w-1/4 rounded shimmer-bg-dark" />
                           </div>
                         </div>
                       ))}
                       <div className="flex items-center gap-2 pt-2">
                         <div className="flex gap-1">
                           {[0, 1, 2].map((i) => (
-                            <span key={i} className="w-1.5 h-1.5 bg-gray-600 rounded-full" style={{ animation: `bounce-dot 1.4s infinite ease-in-out ${i * 0.16}s` }} />
+                            <span key={i} className="w-1.5 h-1.5 bg-gradient-to-r from-blue-600 to-violet-400 rounded-full" style={{ animation: `bounce-dot 1.4s infinite ease-in-out ${i * 0.16}s` }} />
                           ))}
                         </div>
-                        <span className="text-xs text-gray-500">Searching flights...</span>
+                        <span className="text-xs text-gray-400">Searching flights...</span>
                       </div>
                     </div>
                   ) : flightsError ? (
-                    <div className="p-3 rounded-xl bg-red-50 border border-red-100">
-                      <p className="text-xs text-red-600">{flightsError}</p>
+                    <div className="p-3 rounded-xl bg-red-900/30 border border-red-800">
+                      <p className="text-xs text-red-400">{flightsError}</p>
                     </div>
                   ) : flights.length > 0 ? (
                     <div className="space-y-3">
-                      {flights.slice(0, 5).map((flight, idx) => (
-                        <a
-                          key={flight.id || idx}
-                          href={flight.bookingUrl || "#"}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="block p-3 rounded-xl border border-gray-100 hover:border-gray-200 hover:shadow-sm transition-all"
-                        >
-                          <div className="flex items-center justify-between mb-2">
-                            <span className="text-lg font-bold text-emerald-600">${flight.price}</span>
-                            <span className="text-[10px] text-gray-400">roundtrip</span>
+                      {flights.slice(0, 5).map((flight, idx) => {
+                        const isSelected = selectedFlight?.id === flight.id;
+                        return (
+                          <div
+                            key={flight.id || idx}
+                            onClick={() => setSelectedFlight(isSelected ? null : flight)}
+                            className={`p-3 rounded-xl border cursor-pointer transition-all ${
+                              isSelected
+                                ? "border-violet-400 bg-violet-900/30 ring-1 ring-violet-400"
+                                : "border-gray-800 hover:border-gray-700 hover:bg-gray-800/50"
+                            }`}
+                          >
+                            <div className="flex items-center justify-between mb-2">
+                              <div className="flex items-center gap-2">
+                                <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center transition-colors ${
+                                  isSelected ? "border-violet-400 bg-gradient-to-r from-blue-600 to-violet-400" : "border-gray-600"
+                                }`}>
+                                  {isSelected && (
+                                    <svg width="12" height="12" fill="none" stroke="white" strokeWidth="2.5">
+                                      <path d="M2 6l3 3 5-6" />
+                                    </svg>
+                                  )}
+                                </div>
+                                <span className="text-lg font-bold text-violet-400">${flight.price}</span>
+                              </div>
+                              <span className="text-[10px] text-gray-500">roundtrip</span>
+                            </div>
+                            
+                            {/* Outbound */}
+                            <div className="space-y-1 mb-2">
+                              <div className="flex items-center gap-2">
+                                <span className="text-[10px] font-medium text-gray-500 w-10">OUT</span>
+                                <span className="text-xs font-semibold text-white">
+                                  {flight.outbound.segments?.[0]?.from || "—"} → {flight.outbound.segments?.[flight.outbound.segments.length - 1]?.to || "—"}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-3 pl-12">
+                                <span className="text-[10px] text-gray-400">
+                                  {flight.outbound.departure ? new Date(flight.outbound.departure).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : "—"}
+                                </span>
+                                <span className="text-[10px] text-gray-500">
+                                  {Math.floor((flight.outbound.duration || 0) / 60)}h {(flight.outbound.duration || 0) % 60}m
+                                </span>
+                                <span className="text-[10px] text-gray-500">
+                                  {flight.outbound.stops === 0 ? "Nonstop" : `${flight.outbound.stops} stop${flight.outbound.stops > 1 ? 's' : ''}`}
+                                </span>
+                              </div>
+                            </div>
+                            
+                            {/* Return */}
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-2">
+                                <span className="text-[10px] font-medium text-gray-500 w-10">RET</span>
+                                <span className="text-xs font-semibold text-white">
+                                  {flight.return.segments?.[0]?.from || "—"} → {flight.return.segments?.[flight.return.segments.length - 1]?.to || "—"}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-3 pl-12">
+                                <span className="text-[10px] text-gray-400">
+                                  {flight.return.departure ? new Date(flight.return.departure).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : "—"}
+                                </span>
+                                <span className="text-[10px] text-gray-500">
+                                  {Math.floor((flight.return.duration || 0) / 60)}h {(flight.return.duration || 0) % 60}m
+                                </span>
+                                <span className="text-[10px] text-gray-500">
+                                  {flight.return.stops === 0 ? "Nonstop" : `${flight.return.stops} stop${flight.return.stops > 1 ? 's' : ''}`}
+                                </span>
+                              </div>
+                            </div>
+                            
+                            <div className="flex items-center justify-between mt-2 pt-2 border-t border-gray-800">
+                              {flight.outbound.segments?.[0]?.carrier && (
+                                <span className="text-[10px] text-gray-500">
+                                  {flight.outbound.segments[0].carrier}
+                                </span>
+                              )}
+                              {flight.bookingUrl && (
+                                <a
+                                  href={flight.bookingUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="text-[10px] font-medium text-violet-400 hover:text-violet-300"
+                                >
+                                  Book →
+                                </a>
+                              )}
+                            </div>
                           </div>
-                          
-                          {/* Outbound */}
-                          <div className="space-y-1 mb-2">
-                            <div className="flex items-center gap-2">
-                              <span className="text-[10px] font-medium text-gray-400 w-10">OUT</span>
-                              <span className="text-xs font-semibold text-gray-900">
-                                {flight.outbound.segments?.[0]?.from || "—"} → {flight.outbound.segments?.[flight.outbound.segments.length - 1]?.to || "—"}
-                              </span>
-                            </div>
-                            <div className="flex items-center gap-3 pl-12">
-                              <span className="text-[10px] text-gray-500">
-                                {flight.outbound.departure ? new Date(flight.outbound.departure).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : "—"}
-                              </span>
-                              <span className="text-[10px] text-gray-400">
-                                {Math.floor((flight.outbound.duration || 0) / 60)}h {(flight.outbound.duration || 0) % 60}m
-                              </span>
-                              <span className="text-[10px] text-gray-400">
-                                {flight.outbound.stops === 0 ? "Nonstop" : `${flight.outbound.stops} stop${flight.outbound.stops > 1 ? 's' : ''}`}
-                              </span>
-                            </div>
-                          </div>
-                          
-                          {/* Return */}
-                          <div className="space-y-1">
-                            <div className="flex items-center gap-2">
-                              <span className="text-[10px] font-medium text-gray-400 w-10">RET</span>
-                              <span className="text-xs font-semibold text-gray-900">
-                                {flight.return.segments?.[0]?.from || "—"} → {flight.return.segments?.[flight.return.segments.length - 1]?.to || "—"}
-                              </span>
-                            </div>
-                            <div className="flex items-center gap-3 pl-12">
-                              <span className="text-[10px] text-gray-500">
-                                {flight.return.departure ? new Date(flight.return.departure).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : "—"}
-                              </span>
-                              <span className="text-[10px] text-gray-400">
-                                {Math.floor((flight.return.duration || 0) / 60)}h {(flight.return.duration || 0) % 60}m
-                              </span>
-                              <span className="text-[10px] text-gray-400">
-                                {flight.return.stops === 0 ? "Nonstop" : `${flight.return.stops} stop${flight.return.stops > 1 ? 's' : ''}`}
-                              </span>
-                            </div>
-                          </div>
-                          
-                          {flight.outbound.segments?.[0]?.carrier && (
-                            <p className="text-[10px] text-gray-400 mt-2 pt-2 border-t border-gray-50">
-                              {flight.outbound.segments[0].carrier}
-                            </p>
-                          )}
-                        </a>
-                      ))}
+                        );
+                      })}
                       {flights.length > 5 && (
-                        <p className="text-xs text-center text-gray-400 pt-2">
+                        <p className="text-xs text-center text-gray-500 pt-2">
                           +{flights.length - 5} more flights available
                         </p>
                       )}
                     </div>
                   ) : flightParams?.departure_airport_code ? (
-                    <div className="p-4 rounded-xl bg-gray-50 border border-gray-100 text-center">
-                      <p className="text-xs text-gray-500">No flights found for these dates</p>
+                    <div className="p-4 rounded-xl bg-gray-800/50 border border-gray-800 text-center">
+                      <p className="text-xs text-gray-400">No flights found for these dates</p>
                     </div>
                   ) : (
-                    <div className="p-4 rounded-xl bg-gray-50 border border-gray-100 text-center">
-                      <p className="text-xs text-gray-500">Add your departure city to see flight prices</p>
+                    <div className="p-4 rounded-xl bg-gray-800/50 border border-gray-800 text-center">
+                      <p className="text-xs text-gray-400">Add your departure city to see flight prices</p>
                     </div>
                   )}
                 </div>
 
                 {/* Hotels Section */}
-                <div className="pt-6 border-t border-gray-100">
+                <div className="pt-6 border-t border-gray-800">
                   <div className="flex items-center gap-2 mb-4">
-                    <svg width="18" height="18" fill="none" stroke="#1a1a1a" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <svg width="18" height="18" fill="none" stroke="#a78bfa" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M3 7v11a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7"/><path d="M21 7H3l2-4h14l2 4Z"/><path d="M8 11h8v6H8z"/>
                     </svg>
-                    <h3 className="text-sm font-bold text-gray-900">Recommended Hotels</h3>
+                    <h3 className="text-sm font-bold text-white">Recommended Hotels</h3>
                   </div>
                   
                   {loadingHotels ? (
                     <div className="space-y-3">
                       {[1, 2, 3].map((i) => (
-                        <div key={i} className="p-3 rounded-xl border border-gray-100">
+                        <div key={i} className="p-3 rounded-xl border border-gray-800">
                           <div className="flex gap-3">
-                            <div className="w-16 h-16 rounded-lg shimmer-bg" />
+                            <div className="w-16 h-16 rounded-lg shimmer-bg-dark" />
                             <div className="flex-1 space-y-2">
-                              <div className="h-4 w-3/4 rounded shimmer-bg" />
-                              <div className="h-3 w-1/2 rounded shimmer-bg" />
-                              <div className="h-4 w-1/4 rounded shimmer-bg" />
+                              <div className="h-4 w-3/4 rounded shimmer-bg-dark" />
+                              <div className="h-3 w-1/2 rounded shimmer-bg-dark" />
+                              <div className="h-4 w-1/4 rounded shimmer-bg-dark" />
                             </div>
                           </div>
                         </div>
@@ -630,86 +877,110 @@ export default function Home() {
                       <div className="flex items-center gap-2 pt-2">
                         <div className="flex gap-1">
                           {[0, 1, 2].map((i) => (
-                            <span key={i} className="w-1.5 h-1.5 bg-gray-600 rounded-full" style={{ animation: `bounce-dot 1.4s infinite ease-in-out ${i * 0.16}s` }} />
+                            <span key={i} className="w-1.5 h-1.5 bg-gradient-to-r from-blue-600 to-violet-400 rounded-full" style={{ animation: `bounce-dot 1.4s infinite ease-in-out ${i * 0.16}s` }} />
                           ))}
                         </div>
-                        <span className="text-xs text-gray-500">Finding best hotels...</span>
+                        <span className="text-xs text-gray-400">Finding best hotels...</span>
                       </div>
                     </div>
                   ) : hotelsError ? (
-                    <div className="p-3 rounded-xl bg-red-50 border border-red-100">
-                      <p className="text-xs text-red-600">{hotelsError}</p>
+                    <div className="p-3 rounded-xl bg-red-900/30 border border-red-800">
+                      <p className="text-xs text-red-400">{hotelsError}</p>
                     </div>
                   ) : hotels.length > 0 ? (
                     <div className="space-y-3">
-                      {hotels.slice(0, 5).map((hotel, idx) => (
-                        <a
-                          key={idx}
-                          href={hotel.link || "#"}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="block p-3 rounded-xl border border-gray-100 hover:border-gray-200 hover:shadow-sm transition-all"
-                        >
-                          <div className="flex gap-3">
-                            {hotel.thumbnail ? (
-                              <img
-                                src={hotel.thumbnail}
-                                alt={hotel.name}
-                                className="w-16 h-16 rounded-lg object-cover bg-gray-100"
-                              />
-                            ) : (
-                              <div className="w-16 h-16 rounded-lg bg-gray-100 flex items-center justify-center">
-                                <svg width="20" height="20" fill="none" stroke="#999" strokeWidth="1.5">
-                                  <path d="M3 7v11a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7"/><path d="M21 7H3l2-4h14l2 4Z"/>
-                                </svg>
-                              </div>
-                            )}
-                            <div className="flex-1 min-w-0">
-                              <h4 className="text-sm font-semibold text-gray-900 truncate">{hotel.name}</h4>
-                              <div className="flex items-center gap-2 mt-0.5">
-                                {hotel.rating > 0 && (
-                                  <div className="flex items-center gap-1">
-                                    <svg width="12" height="12" fill="#facc15" stroke="#facc15" strokeWidth="1">
-                                      <polygon points="12,2 15,9 22,9 17,14 19,21 12,17 5,21 7,14 2,9 9,9"/>
+                      {hotels.slice(0, 5).map((hotel, idx) => {
+                        const isSelected = selectedHotel?.name === hotel.name;
+                        return (
+                          <div
+                            key={idx}
+                            onClick={() => setSelectedHotel(isSelected ? null : hotel)}
+                            className={`p-3 rounded-xl border cursor-pointer transition-all ${
+                              isSelected
+                                ? "border-violet-400 bg-violet-900/30 ring-1 ring-violet-400"
+                                : "border-gray-800 hover:border-gray-700 hover:bg-gray-800/50"
+                            }`}
+                          >
+                            <div className="flex gap-3">
+                              <div className="relative">
+                                {hotel.thumbnail ? (
+                                  <img
+                                    src={hotel.thumbnail}
+                                    alt={hotel.name}
+                                    className="w-16 h-16 rounded-lg object-cover bg-gray-800"
+                                  />
+                                ) : (
+                                  <div className="w-16 h-16 rounded-lg bg-gray-800 flex items-center justify-center">
+                                    <svg width="20" height="20" fill="none" stroke="#666" strokeWidth="1.5">
+                                      <path d="M3 7v11a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7"/><path d="M21 7H3l2-4h14l2 4Z"/>
                                     </svg>
-                                    <span className="text-xs font-medium text-gray-600">{hotel.rating.toFixed(1)}</span>
                                   </div>
                                 )}
-                                {hotel.hotel_class && (
-                                  <span className="text-[10px] text-gray-400">{hotel.hotel_class}-star</span>
-                                )}
+                                <div className={`absolute -top-1 -left-1 w-5 h-5 rounded-full border-2 flex items-center justify-center transition-colors ${
+                                  isSelected ? "border-violet-400 bg-gradient-to-r from-blue-600 to-violet-400" : "border-gray-600 bg-gray-900"
+                                }`}>
+                                  {isSelected && (
+                                    <svg width="12" height="12" fill="none" stroke="white" strokeWidth="2.5">
+                                      <path d="M2 6l3 3 5-6" />
+                                    </svg>
+                                  )}
+                                </div>
                               </div>
-                              <div className="flex items-center justify-between mt-1.5">
-                                <span className="text-sm font-bold text-emerald-600">{hotel.price_formatted}</span>
-                                <span className="text-[10px] text-gray-400">/night</span>
+                              <div className="flex-1 min-w-0">
+                                <h4 className="text-sm font-semibold text-white truncate">{hotel.name}</h4>
+                                <div className="flex items-center gap-2 mt-0.5">
+                                  {hotel.rating > 0 && (
+                                    <div className="flex items-center gap-1">
+                                      <svg width="12" height="12" fill="#facc15" stroke="#facc15" strokeWidth="1">
+                                        <polygon points="12,2 15,9 22,9 17,14 19,21 12,17 5,21 7,14 2,9 9,9"/>
+                                      </svg>
+                                      <span className="text-xs font-medium text-gray-300">{hotel.rating.toFixed(1)}</span>
+                                    </div>
+                                  )}
+                                  {hotel.hotel_class && (
+                                    <span className="text-[10px] text-gray-500">{hotel.hotel_class}-star</span>
+                                  )}
+                                </div>
+                                <div className="flex items-center justify-between mt-1.5">
+                                  <span className="text-sm font-bold text-violet-400">{hotel.price_formatted}</span>
+                                  <span className="text-[10px] text-gray-500">/night</span>
+                                </div>
                               </div>
                             </div>
-                          </div>
-                          {hotel.amenities.length > 0 && (
-                            <div className="flex flex-wrap gap-1 mt-2">
-                              {hotel.amenities.slice(0, 4).map((amenity, i) => (
-                                <span key={i} className="px-1.5 py-0.5 text-[9px] font-medium bg-gray-100 text-gray-500 rounded">
-                                  {amenity}
-                                </span>
-                              ))}
-                              {hotel.amenities.length > 4 && (
-                                <span className="px-1.5 py-0.5 text-[9px] font-medium text-gray-400">
-                                  +{hotel.amenities.length - 4} more
-                                </span>
+                            <div className="flex items-center justify-between mt-2">
+                              {hotel.amenities.length > 0 && (
+                                <div className="flex flex-wrap gap-1">
+                                  {hotel.amenities.slice(0, 3).map((amenity, i) => (
+                                    <span key={i} className="px-1.5 py-0.5 text-[9px] font-medium bg-gray-800 text-gray-400 rounded">
+                                      {amenity}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                              {hotel.link && (
+                                <a
+                                  href={hotel.link}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="text-[10px] font-medium text-violet-400 hover:text-violet-300"
+                                >
+                                  Book →
+                                </a>
                               )}
                             </div>
-                          )}
-                        </a>
-                      ))}
+                          </div>
+                        );
+                      })}
                       {hotels.length > 5 && (
-                        <p className="text-xs text-center text-gray-400 pt-2">
+                        <p className="text-xs text-center text-gray-500 pt-2">
                           +{hotels.length - 5} more hotels available
                         </p>
                       )}
                     </div>
                   ) : (
-                    <div className="p-4 rounded-xl bg-gray-50 border border-gray-100 text-center">
-                      <p className="text-xs text-gray-500">No hotels found for these dates</p>
+                    <div className="p-4 rounded-xl bg-gray-800/50 border border-gray-800 text-center">
+                      <p className="text-xs text-gray-400">No hotels found for these dates</p>
                     </div>
                   )}
                 </div>
@@ -717,22 +988,90 @@ export default function Home() {
             ) : null}
           </div>
         </div>
+        
+        {/* Price Summary Panel - Sticky at bottom */}
+        {itineraryPlan && (selectedFlight || selectedHotel || selectedActivities.size > 0) && (
+          <div className="sticky bottom-0 left-0 right-0 bg-[#1a1a1a] border-t border-gray-800 p-4 shadow-lg">
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-bold text-white">Trip Estimate</span>
+                <button 
+                  onClick={() => {
+                    setSelectedFlight(null);
+                    setSelectedHotel(null);
+                    setSelectedActivities(new Set());
+                  }}
+                  className="text-xs text-gray-500 hover:text-gray-300"
+                >
+                  Clear all
+                </button>
+              </div>
+              
+              <div className="space-y-2 text-sm">
+                {selectedFlight && (
+                  <div className="flex justify-between items-center">
+                    <span className="text-gray-400 flex items-center gap-2">
+                      <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z"/>
+                      </svg>
+                      Flights
+                    </span>
+                    <span className="font-medium text-white">${calculateTotalCost().flights.toLocaleString()}</span>
+                  </div>
+                )}
+                {selectedHotel && (
+                  <div className="flex justify-between items-center">
+                    <span className="text-gray-400 flex items-center gap-2">
+                      <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M3 7v11a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7"/><path d="M21 7H3l2-4h14l2 4Z"/>
+                      </svg>
+                      Hotel ({calculateTotalCost().nights} nights)
+                    </span>
+                    <span className="font-medium text-white">${calculateTotalCost().hotel.toLocaleString()}</span>
+                  </div>
+                )}
+                {selectedActivities.size > 0 && (
+                  <div className="flex justify-between items-center">
+                    <span className="text-gray-400 flex items-center gap-2">
+                      <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2">
+                        <circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>
+                      </svg>
+                      Activities ({selectedActivities.size})
+                    </span>
+                    <span className="font-medium text-white">${calculateTotalCost().activities.toLocaleString()}</span>
+                  </div>
+                )}
+              </div>
+              
+              <div className="pt-3 border-t border-gray-800">
+                <div className="flex justify-between items-center">
+                  <span className="text-base font-bold text-white">Total Estimate</span>
+                  <span className="text-xl font-bold text-violet-400">
+                    ${calculateTotalCost().total.toLocaleString()}
+                  </span>
+                </div>
+                <p className="text-[10px] text-gray-500 mt-1">
+                  {flightParams?.number_of_adults && flightParams.number_of_adults > 1 
+                    ? `Per person prices shown • ${flightParams.number_of_adults} travelers`
+                    : "Prices may vary • Select items to add to estimate"
+                  }
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
       </aside>
 
       {/* Main */}
       <div className={`flex-1 transition-all duration-300 ${sidebarOpen ? 'ml-[380px]' : 'ml-0'}`}>
         {/* Header */}
-        <header className="sticky top-0 z-20 h-16 flex items-center justify-between px-6 bg-[#f7f7f8] border-b border-gray-200/60">
+        <header className="sticky top-0 z-20 h-16 flex items-center justify-between px-6 bg-[#0a0a0a] border-b border-gray-800">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 bg-gray-900 rounded-xl flex items-center justify-center">
-              <svg width="18" height="18" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/>
-              </svg>
-            </div>
-            <span className="text-base font-bold text-gray-900">sidequest</span>
+            <img src="/logo.png" alt="Sidequest Logo" className="w-9 h-9 rounded-xl object-cover" />
+            <span className="text-base font-bold text-white">sidequest</span>
           </div>
           {(itineraryPlan || flightParams) && (
-            <button onClick={resetSearch} className="px-4 py-2 text-sm font-semibold text-gray-600 hover:text-gray-900 hover:bg-white rounded-xl border border-transparent hover:border-gray-200 transition-all">
+            <button onClick={resetSearch} className="px-4 py-2 text-sm font-semibold text-gray-400 hover:text-white hover:bg-gray-800 rounded-xl border border-transparent hover:border-gray-700 transition-all">
               New trip
             </button>
           )}
@@ -743,15 +1082,20 @@ export default function Home() {
           <div className="w-full max-w-xl space-y-10">
             {/* Hero */}
             <div className="text-center space-y-4">
-              <h1 className="text-4xl font-bold text-gray-900 tracking-tight">tell me about your next sidequest.</h1>
-              <p className="text-lg text-gray-500">Describe your dream trip and I'll create a personalized itinerary.</p>
+              <img 
+                src="/star2.png" 
+                alt="Star" 
+                className="w-64 h-64 mx-auto mb-2"
+              />
+              <h1 className="text-4xl font-bold text-white tracking-tight">tell me about your next git .</h1>
+              <p className="text-lg text-gray-400">describe your dream, and i'll make it a reality.</p>
             </div>
 
             {/* Main Input */}
             <form onSubmit={handleSubmit} className="space-y-5">
               <div 
-                className="relative bg-white rounded-2xl overflow-hidden"
-                style={{ boxShadow: '0 0 0 1px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.05)' }}
+                className="relative bg-[#1a1a1a] rounded-2xl overflow-hidden"
+                style={{ boxShadow: '0 0 0 1px rgba(255,255,255,0.1), 0 4px 12px rgba(0,0,0,0.3)' }}
               >
                 <input
                   ref={inputRef}
@@ -760,13 +1104,13 @@ export default function Home() {
                   onChange={(e) => setInput(e.target.value)}
                   placeholder="Plan a trip from NYC to Tokyo, March 15-22..."
                   disabled={loading}
-                  className="w-full h-14 pl-5 pr-28 text-base text-gray-900 bg-white placeholder-gray-400 border-0 focus:ring-0 focus:outline-none"
+                  className="w-full h-14 pl-5 pr-28 text-base text-white bg-[#1a1a1a] placeholder-gray-500 border-0 focus:ring-0 focus:outline-none"
                   style={{ fontSize: '16px' }}
                 />
                 <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-2">
                   <button
                     type="button"
-                    className="w-10 h-10 flex items-center justify-center text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-xl transition-colors"
+                    className="w-10 h-10 flex items-center justify-center text-gray-500 hover:text-gray-300 hover:bg-gray-800 rounded-xl transition-colors"
                   >
                     <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/>
@@ -775,8 +1119,8 @@ export default function Home() {
                   <button
                     type="submit"
                     disabled={loading || !input.trim()}
-                    className="w-10 h-10 flex items-center justify-center bg-gray-900 text-white rounded-xl hover:bg-gray-800 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
-                    style={{ boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}
+                    className="w-10 h-10 flex items-center justify-center bg-gradient-to-r from-blue-600 to-violet-400 text-white rounded-xl hover:bg-gradient-to-r from-blue-600 to-violet-400 disabled:bg-gray-700 disabled:text-gray-500 disabled:cursor-not-allowed transition-colors"
+                    style={{ boxShadow: '0 1px 3px rgba(0,0,0,0.3)' }}
                   >
                     <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>
@@ -792,10 +1136,10 @@ export default function Home() {
                   onClick={() => setShowVideoInput(!showVideoInput)}
                   className={`flex items-center gap-2 px-5 py-2.5 text-sm font-semibold rounded-full transition-all ${
                     showVideoInput || videoEntries.length > 0
-                      ? 'bg-gray-900 text-white'
-                      : 'bg-white text-gray-600 hover:text-gray-900 border border-gray-200 hover:border-gray-300'
+                      ? 'bg-gradient-to-r from-blue-600 to-violet-400 text-white'
+                      : 'bg-[#1a1a1a] text-gray-400 hover:text-white border border-gray-700 hover:border-gray-600'
                   }`}
-                  style={{ boxShadow: showVideoInput || videoEntries.length > 0 ? '0 2px 8px rgba(0,0,0,0.15)' : '0 1px 3px rgba(0,0,0,0.08)' }}
+                  style={{ boxShadow: showVideoInput || videoEntries.length > 0 ? '0 2px 8px rgba(167,139,250,0.3)' : 'none' }}
                 >
                   <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="m22 8-6 4 6 4V8Z"/><rect width="14" height="12" x="2" y="6" rx="2" ry="2"/>
@@ -807,10 +1151,10 @@ export default function Home() {
                   onClick={() => setShowPreferences(!showPreferences)}
                   className={`flex items-center gap-2 px-5 py-2.5 text-sm font-semibold rounded-full transition-all ${
                     showPreferences || activityPreferences
-                      ? 'bg-gray-900 text-white'
-                      : 'bg-white text-gray-600 hover:text-gray-900 border border-gray-200 hover:border-gray-300'
+                      ? 'bg-gradient-to-r from-blue-600 to-violet-400 text-white'
+                      : 'bg-[#1a1a1a] text-gray-400 hover:text-white border border-gray-700 hover:border-gray-600'
                   }`}
-                  style={{ boxShadow: showPreferences || activityPreferences ? '0 2px 8px rgba(0,0,0,0.15)' : '0 1px 3px rgba(0,0,0,0.08)' }}
+                  style={{ boxShadow: showPreferences || activityPreferences ? '0 2px 8px rgba(167,139,250,0.3)' : 'none' }}
                 >
                   <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <circle cx="12" cy="12" r="3"/><path d="M12 1v2m0 18v2M4.2 4.2l1.4 1.4m12.8 12.8 1.4 1.4M1 12h2m18 0h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/>
@@ -822,19 +1166,19 @@ export default function Home() {
 
             {/* Video Input Panel */}
             {showVideoInput && (
-              <div className="bg-white rounded-2xl p-6 space-y-4" style={{ boxShadow: '0 0 0 1px rgba(0,0,0,0.05), 0 4px 12px rgba(0,0,0,0.06)' }}>
+              <div className="bg-[#141414] rounded-2xl p-6 space-y-4 border border-gray-800">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 bg-gray-100 rounded-lg flex items-center justify-center">
-                      <svg width="16" height="16" fill="none" stroke="#666" strokeWidth="2"><path d="m22 8-6 4 6 4V8Z"/><rect width="14" height="12" x="2" y="6" rx="2"/></svg>
+                    <div className="w-8 h-8 bg-gray-800 rounded-lg flex items-center justify-center">
+                      <svg width="16" height="16" fill="none" stroke="#a78bfa" strokeWidth="2"><path d="m22 8-6 4 6 4V8Z"/><rect width="14" height="12" x="2" y="6" rx="2"/></svg>
                     </div>
                     <div>
-                      <span className="text-sm font-bold text-gray-800">Add travel videos</span>
+                      <span className="text-sm font-bold text-white">Add travel videos</span>
                       <p className="text-xs text-gray-500">Add as many as you want - all places will be included</p>
                     </div>
                   </div>
                   {videoEntries.length > 0 && (
-                    <span className="px-2.5 py-1 text-xs font-bold bg-gray-900 text-white rounded-full">
+                    <span className="px-2.5 py-1 text-xs font-bold bg-gradient-to-r from-blue-600 to-violet-400 text-white rounded-full">
                       {videoEntries.length}
                     </span>
                   )}
@@ -846,15 +1190,14 @@ export default function Home() {
                     value={newVideoUrl}
                     onChange={(e) => setNewVideoUrl(e.target.value)}
                     placeholder="Paste Instagram Reel or TikTok URL..."
-                    className="flex-1 h-12 px-4 text-sm bg-gray-50 rounded-xl border border-gray-200 placeholder-gray-400 focus:border-gray-400 focus:bg-white focus:outline-none transition-colors"
+                    className="flex-1 h-12 px-4 text-sm bg-[#1a1a1a] text-white rounded-xl border border-gray-700 placeholder-gray-500 focus:border-violet-400 focus:outline-none transition-colors"
                     onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addVideoUrl(); }}}
                   />
                   <button
                     type="button"
                     onClick={addVideoUrl}
                     disabled={!newVideoUrl.trim()}
-                    className="h-12 px-6 text-sm font-bold bg-gray-900 text-white rounded-xl hover:bg-gray-800 disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed transition-colors"
-                    style={{ boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}
+                    className="h-12 px-6 text-sm font-bold bg-gradient-to-r from-blue-600 to-violet-400 text-white rounded-xl hover:bg-gradient-to-r from-blue-600 to-violet-400 disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed transition-colors"
                   >
                     Add
                   </button>
@@ -866,39 +1209,39 @@ export default function Home() {
                       <div 
                         key={video.id}
                         className={`p-4 rounded-xl ${
-                          video.status === "error" ? "bg-red-50 border border-red-100" :
-                          video.status === "done" ? "bg-emerald-50 border border-emerald-100" :
-                          "bg-blue-50 border border-blue-100"
+                          video.status === "error" ? "bg-red-900/20 border border-red-800" :
+                          video.status === "done" ? "bg-violet-900/20 border border-violet-800" :
+                          "bg-blue-900/20 border border-blue-800"
                         }`}
                       >
                         <div className="flex items-start justify-between">
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2 mb-2">
-                              <span className="w-5 h-5 flex items-center justify-center bg-gray-900 text-white text-[10px] font-bold rounded-full">{idx + 1}</span>
-                              <p className="text-xs font-mono text-gray-500 truncate">{video.url}</p>
+                              <span className="w-5 h-5 flex items-center justify-center bg-gradient-to-r from-blue-600 to-violet-400 text-white text-[10px] font-bold rounded-full">{idx + 1}</span>
+                              <p className="text-xs font-mono text-gray-400 truncate">{video.url}</p>
                             </div>
                             {video.status === "analyzing" && (
                               <div className="flex items-center gap-2 mt-2">
                                 <div className="flex gap-1">
                                   {[0, 1, 2].map((i) => (
-                                    <span key={i} className="w-1.5 h-1.5 bg-blue-500 rounded-full" style={{ animation: `bounce-dot 1.4s infinite ease-in-out ${i * 0.16}s` }} />
+                                    <span key={i} className="w-1.5 h-1.5 bg-gradient-to-r from-blue-600 to-violet-400 rounded-full" style={{ animation: `bounce-dot 1.4s infinite ease-in-out ${i * 0.16}s` }} />
                                   ))}
                                 </div>
-                                <span className="text-xs font-semibold text-blue-600">Detecting places...</span>
+                                <span className="text-xs font-semibold text-violet-300">Detecting places...</span>
                               </div>
                             )}
                             {video.status === "done" && video.analysis && (
                               <div className="space-y-2 mt-2">
                                 {video.analysis.suggestedDestination && (
                                   <div className="flex items-center gap-1.5">
-                                    <svg width="12" height="12" fill="none" stroke="#059669" strokeWidth="2.5"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>
-                                    <span className="text-xs font-bold text-emerald-700">{video.analysis.suggestedDestination}</span>
+                                    <svg width="12" height="12" fill="none" stroke="#a78bfa" strokeWidth="2.5"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>
+                                    <span className="text-xs font-bold text-violet-300">{video.analysis.suggestedDestination}</span>
                                   </div>
                                 )}
                                 {video.analysis.locations.length > 0 && (
                                   <div className="flex flex-wrap gap-1.5">
                                     {video.analysis.locations.map((loc, i) => (
-                                      <span key={i} className="px-2 py-1 text-[11px] font-medium bg-white text-gray-700 rounded-md border border-emerald-200">
+                                      <span key={i} className="px-2 py-1 text-[11px] font-medium bg-gray-800 text-gray-300 rounded-md border border-gray-700">
                                         {loc.name}
                                       </span>
                                     ))}
@@ -909,9 +1252,9 @@ export default function Home() {
                                 )}
                               </div>
                             )}
-                            {video.status === "error" && <span className="text-xs font-semibold text-red-600 mt-2 block">{video.error}</span>}
+                            {video.status === "error" && <span className="text-xs font-semibold text-red-400 mt-2 block">{video.error}</span>}
                           </div>
-                          <button onClick={() => removeVideo(video.id)} className="ml-3 w-7 h-7 flex items-center justify-center text-gray-400 hover:text-red-500 hover:bg-white rounded-lg transition-colors">
+                          <button onClick={() => removeVideo(video.id)} className="ml-3 w-7 h-7 flex items-center justify-center text-gray-500 hover:text-red-400 hover:bg-gray-800 rounded-lg transition-colors">
                             <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
                           </button>
                         </div>
@@ -922,14 +1265,14 @@ export default function Home() {
 
                 {/* Summary of all places */}
                 {allPlacesFromVideos.length > 0 && (
-                  <div className="pt-4 border-t border-gray-100">
+                  <div className="pt-4 border-t border-gray-700">
                     <div className="flex items-center gap-2 mb-3">
-                      <svg width="14" height="14" fill="none" stroke="#059669" strokeWidth="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/></svg>
-                      <span className="text-xs font-bold text-emerald-700 uppercase tracking-wide">{allPlacesFromVideos.length} places will be included</span>
+                      <svg width="14" height="14" fill="none" stroke="#a78bfa" strokeWidth="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/></svg>
+                      <span className="text-xs font-bold text-violet-300 uppercase tracking-wide">{allPlacesFromVideos.length} places will be included</span>
                     </div>
                     <div className="flex flex-wrap gap-1.5">
                       {allPlacesFromVideos.map((place, i) => (
-                        <span key={i} className="px-2.5 py-1 text-xs font-medium bg-emerald-100 text-emerald-800 rounded-full">
+                        <span key={i} className="px-2.5 py-1 text-xs font-medium bg-violet-900/30 text-violet-300 rounded-full border border-violet-800">
                           {place.name}
                         </span>
                       ))}
@@ -941,20 +1284,20 @@ export default function Home() {
 
             {/* Preferences Panel */}
             {showPreferences && (
-              <div className="bg-white rounded-2xl p-6 space-y-4" style={{ boxShadow: '0 0 0 1px rgba(0,0,0,0.05), 0 4px 12px rgba(0,0,0,0.06)' }}>
+              <div className="bg-[#141414] rounded-2xl p-6 space-y-4 border border-gray-800">
                 <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 bg-gray-100 rounded-lg flex items-center justify-center">
-                    <svg width="16" height="16" fill="none" stroke="#666" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v2m0 18v2M4.2 4.2l1.4 1.4m12.8 12.8 1.4 1.4M1 12h2m18 0h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/></svg>
+                  <div className="w-8 h-8 bg-gray-800 rounded-lg flex items-center justify-center">
+                    <svg width="16" height="16" fill="none" stroke="#a78bfa" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v2m0 18v2M4.2 4.2l1.4 1.4m12.8 12.8 1.4 1.4M1 12h2m18 0h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/></svg>
                   </div>
-                  <span className="text-sm font-bold text-gray-800">Trip preferences</span>
+                  <span className="text-sm font-bold text-white">Trip preferences</span>
                 </div>
                 <textarea
                   value={activityPreferences}
                   onChange={(e) => setActivityPreferences(e.target.value)}
                   placeholder="I love trying local street food, visiting museums, no hostels, prefer 4-star hotels..."
-                  className="w-full h-28 px-4 py-3 text-sm bg-gray-50 rounded-xl border border-gray-200 placeholder-gray-400 resize-none focus:border-gray-400 focus:bg-white focus:outline-none transition-colors"
+                  className="w-full h-28 px-4 py-3 text-sm bg-[#1a1a1a] text-white rounded-xl border border-gray-700 placeholder-gray-500 resize-none focus:border-violet-400 focus:outline-none transition-colors"
                 />
-                <p className="text-[10px] text-gray-400 mt-2">
+                <p className="text-[10px] text-gray-500 mt-2">
                   Tip: Add hotel preferences like "no hostels", "luxury only", or "budget-friendly"
                 </p>
               </div>
@@ -965,10 +1308,10 @@ export default function Home() {
               <div className="flex items-center justify-center gap-4 py-6">
                 <div className="flex gap-1.5">
                   {[0, 1, 2].map((i) => (
-                    <span key={i} className="w-2.5 h-2.5 bg-gray-800 rounded-full" style={{ animation: `bounce-dot 1.4s infinite ease-in-out ${i * 0.16}s` }} />
+                    <span key={i} className="w-2.5 h-2.5 bg-gradient-to-r from-blue-600 to-violet-400 rounded-full" style={{ animation: `bounce-dot 1.4s infinite ease-in-out ${i * 0.16}s` }} />
                   ))}
                 </div>
-                <span className="text-sm font-semibold text-gray-500">
+                <span className="text-sm font-semibold text-gray-400">
                   {analyzingCount > 0 ? `Analyzing ${analyzingCount} video${analyzingCount > 1 ? 's' : ''}...` : 'Planning your adventure...'}
                 </span>
               </div>
@@ -976,25 +1319,24 @@ export default function Home() {
 
             {/* Error */}
             {error && (
-              <div className="flex items-start gap-4 p-5 bg-red-50 rounded-2xl border border-red-100">
-                <div className="w-8 h-8 bg-red-100 rounded-lg flex items-center justify-center shrink-0">
-                  <svg width="16" height="16" fill="none" stroke="#ef4444" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+              <div className="flex items-start gap-4 p-5 bg-red-900/20 rounded-2xl border border-red-800">
+                <div className="w-8 h-8 bg-red-900/30 rounded-lg flex items-center justify-center shrink-0">
+                  <svg width="16" height="16" fill="none" stroke="#f87171" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
                 </div>
-                <p className="text-sm font-medium text-red-700 pt-1">{error}</p>
+                <p className="text-sm font-medium text-red-400 pt-1">{error}</p>
               </div>
             )}
 
             {/* Suggestions */}
             {!loading && !itineraryPlan && (
               <div className="pt-4 text-center">
-                <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-4">Try something like</p>
+                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-4">Try something like</p>
                 <div className="flex flex-wrap justify-center gap-2">
                   {["Weekend getaway to Paris", "2 weeks in Japan", "Road trip through Iceland"].map((s) => (
                     <button
                       key={s}
                       onClick={() => setInput(s)}
-                      className="px-4 py-2.5 text-sm font-medium text-gray-600 bg-white border border-gray-200 rounded-full hover:border-gray-300 hover:text-gray-900 transition-colors"
-                      style={{ boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}
+                      className="px-4 py-2.5 text-sm font-medium text-gray-400 bg-[#1a1a1a] border border-gray-700 rounded-full hover:border-gray-600 hover:text-white transition-colors"
                     >
                       {s}
                     </button>
@@ -1009,8 +1351,8 @@ export default function Home() {
         {itineraryPlan && !sidebarOpen && (
           <button
             onClick={() => setSidebarOpen(true)}
-            className="fixed left-4 top-1/2 -translate-y-1/2 w-12 h-12 flex items-center justify-center bg-white rounded-full hover:scale-105 transition-transform z-10"
-            style={{ boxShadow: '0 0 0 1px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.1)' }}
+            className="fixed left-4 top-1/2 -translate-y-1/2 w-12 h-12 flex items-center justify-center bg-[#1a1a1a] text-violet-400 rounded-full hover:scale-105 transition-transform z-10 border border-gray-700"
+            style={{ boxShadow: '0 4px 12px rgba(0,0,0,0.3)' }}
           >
             <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6"/></svg>
           </button>
