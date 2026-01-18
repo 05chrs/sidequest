@@ -14,7 +14,7 @@ const FlightSearchRequest = z.object({
 });
 
 // Prefer env var on Vercel; fallback keeps your hackathon demo working locally
-const FLIGHT_API_KEY = process.env.FLIGHT_API_KEY || "696c238d33a065399aba87d5";
+const FLIGHT_API_KEY = process.env.FLIGHT_API_KEY || "696d1b0929c195ed026e71d8";
 
 export async function POST(req: Request) {
   try {
