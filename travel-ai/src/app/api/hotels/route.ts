@@ -11,7 +11,7 @@ const HotelSearchRequest = z.object({
   preferences: z.string().optional(), // User preferences for filtering (e.g., "no hostels", "luxury only")
 });
 
-const SERPAPI_KEY = "c01f922edbef53faa5699a32ab4b1502dd87c40cb3f18cccda95e5376ca54682";
+const SERPAPI_KEY = "71cb4d386a17c85cc31aa57fc8b7cb5388cdda4b702775519db041babe78faea";
 
 export interface HotelResult {
   name: string;

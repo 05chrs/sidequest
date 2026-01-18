@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-const SERPAPI_KEY = "c01f922edbef53faa5699a32ab4b1502dd87c40cb3f18cccda95e5376ca54682";
+const SERPAPI_KEY = "71cb4d386a17c85cc31aa57fc8b7cb5388cdda4b702775519db041babe78faea";
 
 const CityImageRequest = z.object({
   city: z.string().min(1),
