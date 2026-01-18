@@ -162,6 +162,11 @@ export default function Home() {
   // City image for sidebar header
   const [cityImage, setCityImage] = useState<string | null>(null);
   const [loadingCityImage, setLoadingCityImage] = useState(false);
+  
+  // Missing info reprompt state
+  const [missingFields, setMissingFields] = useState<string[]>([]);
+  const [pendingParams, setPendingParams] = useState<any>(null);
+  const [originalPrompt, setOriginalPrompt] = useState<string>("");
 
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -180,6 +185,7 @@ export default function Home() {
     setLoading(true);
     setGeneratingItinerary(true);
     setError(null);
+    setMissingFields([]);
 
     try {
       const parseRes = await fetch("/api/parse-trip", {
@@ -194,78 +200,170 @@ export default function Home() {
       }
       
       const parseResult = await parseRes.json();
-      setFlightParams(parseResult.data);
+      const params = parseResult.data;
+      
+      // Check for missing required fields
+      const missing: string[] = [];
+      if (!params.destination_city && !params.arrival_airport_code) {
+        missing.push("destination");
+      }
+      if (!params.departure_date) {
+        missing.push("departure date");
+      }
+      if (!params.arrival_date && !params.trip_duration_days) {
+        missing.push("return date or trip duration");
+      }
+      
+      // If there are missing fields, prompt the user
+      if (missing.length > 0) {
+        setMissingFields(missing);
+        setPendingParams(params);
+        setOriginalPrompt(userMessage);
+        setLoading(false);
+        setGeneratingItinerary(false);
+        return;
+      }
+      
+      setFlightParams(params);
+      await continueWithItinerary(userMessage, params);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+      setGeneratingItinerary(false);
+    }
+  }
+  
+  // Continue itinerary generation after all required info is available
+  async function continueWithItinerary(userMessage: string, params: any) {
+    const completedVideos = videoEntries.filter((v) => v.status === "done" && v.analysis);
+    const allLocations: string[] = [];
+    const allCaptions: string[] = [];
+    let suggestedDestination = "";
 
-      const completedVideos = videoEntries.filter((v) => v.status === "done" && v.analysis);
-      const allLocations: string[] = [];
-      const allCaptions: string[] = [];
-      let suggestedDestination = "";
-
-      for (const video of completedVideos) {
-        if (video.analysis) {
-          video.analysis.locations.forEach((loc) => {
-            if (!allLocations.includes(loc.name)) allLocations.push(loc.name);
-          });
-          if (video.analysis.caption) allCaptions.push(video.analysis.caption);
-          if (!suggestedDestination && video.analysis.suggestedDestination) {
-            suggestedDestination = video.analysis.suggestedDestination;
-          }
+    for (const video of completedVideos) {
+      if (video.analysis) {
+        video.analysis.locations.forEach((loc) => {
+          if (!allLocations.includes(loc.name)) allLocations.push(loc.name);
+        });
+        if (video.analysis.caption) allCaptions.push(video.analysis.caption);
+        if (!suggestedDestination && video.analysis.suggestedDestination) {
+          suggestedDestination = video.analysis.suggestedDestination;
         }
       }
+    }
 
-      let itineraryPrompt = `Create a travel itinerary based on this request: "${userMessage}"`;
-      const destination = parseResult.data?.destination_city || parseResult.data?.arrival_airport_code || suggestedDestination;
-      if (destination) itineraryPrompt += `\n\nDestination: ${destination}`;
-      if (parseResult.data?.departure_date && parseResult.data?.arrival_date) {
-        itineraryPrompt += `\nDates: ${parseResult.data.departure_date} to ${parseResult.data.arrival_date}`;
-      }
-      if (allLocations.length > 0) {
-        itineraryPrompt += `\n\n🎯 IMPORTANT - The user has added ${completedVideos.length} travel video(s) with ${allLocations.length} places that MUST be included in the itinerary:`;
-        itineraryPrompt += `\n${allLocations.map((loc, i) => `${i + 1}. ${loc}`).join("\n")}`;
-        itineraryPrompt += `\n\nYou MUST include ALL of these places in the day-by-day itinerary. These are places the user specifically wants to visit based on videos they've seen.`;
-      }
-      if (allCaptions.length > 0) {
-        itineraryPrompt += `\n\nContext from video captions:\n${allCaptions.map((c, i) => `Video ${i + 1}: "${c}"`).join("\n")}`;
-      }
-      if (activityPreferences.trim()) {
-        itineraryPrompt += `\n\nAdditional user preferences: ${activityPreferences.trim()}`;
-      }
-      itineraryPrompt += "\n\nCreate a detailed day-by-day itinerary that includes EVERY place from the videos, organized logically by location/neighborhood.";
+    let itineraryPrompt = `Create a travel itinerary based on this request: "${userMessage}"`;
+    const destination = params?.destination_city || params?.arrival_airport_code || suggestedDestination;
+    if (destination) itineraryPrompt += `\n\nDestination: ${destination}`;
+    if (params?.departure_date && params?.arrival_date) {
+      itineraryPrompt += `\nDates: ${params.departure_date} to ${params.arrival_date}`;
+    }
+    if (allLocations.length > 0) {
+      itineraryPrompt += `\n\n🎯 IMPORTANT - The user has added ${completedVideos.length} travel video(s) with ${allLocations.length} places that MUST be included in the itinerary:`;
+      itineraryPrompt += `\n${allLocations.map((loc, i) => `${i + 1}. ${loc}`).join("\n")}`;
+      itineraryPrompt += `\n\nYou MUST include ALL of these places in the day-by-day itinerary. These are places the user specifically wants to visit based on videos they've seen.`;
+    }
+    if (allCaptions.length > 0) {
+      itineraryPrompt += `\n\nContext from video captions:\n${allCaptions.map((c, i) => `Video ${i + 1}: "${c}"`).join("\n")}`;
+    }
+    if (activityPreferences.trim()) {
+      itineraryPrompt += `\n\nAdditional user preferences: ${activityPreferences.trim()}`;
+    }
+    itineraryPrompt += "\n\nCreate a detailed day-by-day itinerary that includes EVERY place from the videos, organized logically by location/neighborhood.";
 
-      const planRes = await fetch("/api/plan", {
+    const planRes = await fetch("/api/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: itineraryPrompt }),
+    });
+
+    if (!planRes.ok) {
+      const data = await planRes.json();
+      throw new Error(data?.error || "Failed to generate itinerary");
+    }
+
+    const plan: ItineraryPlan = await planRes.json();
+    setItineraryPlan(plan);
+    setSidebarOpen(true);
+    
+    // Combine user prompt and activity preferences for filtering
+    const userPreferences = `${userMessage} ${activityPreferences}`.trim();
+    
+    // Fetch hotels in parallel if we have destination and dates
+    const hotelDestination = destination || plan.destination;
+    if (hotelDestination && params?.departure_date && params?.arrival_date) {
+      fetchHotels(hotelDestination, params.departure_date, params.arrival_date, params.number_of_adults || 2, userPreferences);
+    }
+    
+    // Fetch flights if we have airport codes
+    if (params?.departure_airport_code && params?.arrival_airport_code) {
+      fetchFlights(params, userPreferences);
+    }
+    
+    // Fetch activity prices for the itinerary
+    fetchActivityPrices(plan);
+    
+    // Fetch city image for sidebar
+    fetchCityImage(plan.destination);
+  }
+  
+  // Handle submission of missing info
+  async function handleMissingInfoSubmit() {
+    const additionalInfo = input.trim();
+    if (!additionalInfo || loading) return;
+    
+    setLoading(true);
+    setGeneratingItinerary(true);
+    setError(null);
+    
+    try {
+      // Combine original prompt with the new info
+      const combinedPrompt = `${originalPrompt}. ${additionalInfo}`;
+      
+      const parseRes = await fetch("/api/parse-trip", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: itineraryPrompt }),
+        body: JSON.stringify({ prompt: combinedPrompt }),
       });
-
-      if (!planRes.ok) {
-        const data = await planRes.json();
-        throw new Error(data?.error || "Failed to generate itinerary");
-      }
-
-      const plan: ItineraryPlan = await planRes.json();
-      setItineraryPlan(plan);
-      setSidebarOpen(true);
       
-      // Combine user prompt and activity preferences for filtering
-      const userPreferences = `${userMessage} ${activityPreferences}`.trim();
-      
-      // Fetch hotels in parallel if we have destination and dates
-      const hotelDestination = destination || plan.destination;
-      if (hotelDestination && parseResult.data?.departure_date && parseResult.data?.arrival_date) {
-        fetchHotels(hotelDestination, parseResult.data.departure_date, parseResult.data.arrival_date, parseResult.data.number_of_adults || 2, userPreferences);
+      if (!parseRes.ok) {
+        const data = await parseRes.json();
+        throw new Error(data?.error || "Failed to parse your request");
       }
       
-      // Fetch flights if we have airport codes
-      if (parseResult.data?.departure_airport_code && parseResult.data?.arrival_airport_code) {
-        fetchFlights(parseResult.data, userPreferences);
+      const parseResult = await parseRes.json();
+      const params = parseResult.data;
+      
+      // Check if we still have missing fields
+      const stillMissing: string[] = [];
+      if (!params.destination_city && !params.arrival_airport_code) {
+        stillMissing.push("destination");
+      }
+      if (!params.departure_date) {
+        stillMissing.push("departure date");
+      }
+      if (!params.arrival_date && !params.trip_duration_days) {
+        stillMissing.push("return date or trip duration");
       }
       
-      // Fetch activity prices for the itinerary
-      fetchActivityPrices(plan);
+      if (stillMissing.length > 0) {
+        setMissingFields(stillMissing);
+        setPendingParams(params);
+        setOriginalPrompt(combinedPrompt);
+        setLoading(false);
+        setGeneratingItinerary(false);
+        return;
+      }
       
-      // Fetch city image for sidebar
-      fetchCityImage(plan.destination);
+      // Clear missing fields state and continue
+      setMissingFields([]);
+      setPendingParams(null);
+      setOriginalPrompt("");
+      setFlightParams(params);
+      setInput(""); // Clear the input
+      
+      await continueWithItinerary(combinedPrompt, params);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -472,7 +570,12 @@ export default function Home() {
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    parseAndGenerateItinerary();
+    // If we have missing fields, handle the additional info submission
+    if (missingFields.length > 0) {
+      handleMissingInfoSubmit();
+    } else {
+      parseAndGenerateItinerary();
+    }
   }
 
   function resetSearch() {
@@ -495,6 +598,9 @@ export default function Home() {
     setSelectedHotel(null);
     setSelectedActivities(new Set());
     setCityImage(null);
+    setMissingFields([]);
+    setPendingParams(null);
+    setOriginalPrompt("");
   }
 
   function addVideoUrl() {
@@ -578,7 +684,7 @@ export default function Home() {
                 <div className="flex items-center gap-3 pt-4">
                   <div className="flex gap-1">
                     {[0, 1, 2].map((i) => (
-                      <span key={i} className="w-2 h-2 bg-gradient-to-r from-blue-600 to-violet-400 rounded-full" style={{ animation: `bounce-dot 1.4s infinite ease-in-out ${i * 0.16}s` }} />
+                      <span key={i} className="w-2 h-2 bg-gradient-to-r from-[#3D0E9D] to-[#0C316C] rounded-full" style={{ animation: `bounce-dot 1.4s infinite ease-in-out ${i * 0.16}s` }} />
                     ))}
                   </div>
                   <span className="text-sm text-gray-400">Creating your itinerary...</span>
@@ -603,7 +709,7 @@ export default function Home() {
                         }}
                       />
                     ) : (
-                      <div className="absolute inset-0 bg-gradient-to-br from-blue-600 to-violet-500" />
+                      <div className="absolute inset-0 bg-gradient-to-br from-[#3D0E9D] to-[#0C316C]" />
                     )}
                     {/* Gradient overlay for text readability */}
                     <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/30 to-transparent" />
@@ -613,14 +719,6 @@ export default function Home() {
                       <p className="text-sm text-white/90 mt-0.5">{itineraryPlan.dates}</p>
                     </div>
                   </div>
-                  {/* Budget badge */}
-                  {itineraryPlan.budget && (
-                    <div className="px-4 py-3 bg-[#1a1a1a]">
-                      <span className="inline-block px-3 py-1 text-xs font-semibold text-gray-300 bg-gray-800 rounded-full border border-gray-700">
-                        {itineraryPlan.budget}
-                      </span>
-                    </div>
-                  )}
                 </div>
 
                 {/* Days */}
@@ -630,39 +728,76 @@ export default function Home() {
                       const key = `${day.day}-${timeOfDay}-${idx}`;
                       const priceInfo = activityPrices.get(key);
                       const isSelected = selectedActivities.has(key);
+                      // Use actual link from API if available, otherwise fall back to Google search
+                      const activityUrl = priceInfo?.link || `https://www.google.com/search?q=${encodeURIComponent(`${item} ${itineraryPlan.destination}`)}`;
+                      const hasOfficialLink = !!priceInfo?.link;
+                      
+                      // Check if this is a logistical item (not a real activity)
+                      const lowerItem = item.toLowerCase();
+                      const isLogistical = /^(transfer|check.?in|check.?out|arrive|depart|travel to|return to|head to|go to|pack|rest|sleep|wake|freshen up|settle in|drop off|pick up|airport|flight|taxi|uber|drive to|walk to hotel|back to hotel|hotel for)/i.test(lowerItem) ||
+                        /transfer$|check.?in$|check.?out$/i.test(lowerItem);
                       
                       return (
                         <li 
                           key={idx} 
-                          className={`text-sm text-gray-300 flex items-start gap-2 p-2 -mx-2 rounded-lg cursor-pointer transition-all ${
+                          className={`text-sm text-gray-300 flex items-start gap-2 p-2 -mx-2 rounded-lg transition-all ${
                             isSelected ? "bg-violet-900/30" : "hover:bg-gray-800/50"
                           }`}
-                          onClick={() => toggleActivitySelection(key)}
                         >
-                          <div className={`w-4 h-4 mt-0.5 rounded border flex items-center justify-center shrink-0 transition-colors ${
-                            isSelected 
-                              ? "border-violet-400 bg-gradient-to-r from-blue-600 to-violet-400" 
-                              : "border-gray-600"
-                          }`}>
+                          <div 
+                            className={`w-4 h-4 mt-0.5 rounded border flex items-center justify-center shrink-0 transition-colors cursor-pointer ${
+                              isSelected 
+                                ? "border-violet-400 bg-gradient-to-r from-[#3D0E9D] to-[#0C316C]" 
+                                : "border-gray-600"
+                            }`}
+                            onClick={() => toggleActivitySelection(key)}
+                          >
                             {isSelected && (
                               <svg width="10" height="10" fill="none" stroke="white" strokeWidth="2.5">
                                 <path d="M1.5 5l2 2 4-4.5" />
                               </svg>
                             )}
                           </div>
-                          <div className="flex-1 min-w-0">
-                            <span className={isSelected ? "text-violet-300" : ""}>{item}</span>
-                            {priceInfo && (
-                              <span className={`ml-2 text-xs font-medium ${
-                                priceInfo.price === 0 ? "text-gray-500" :
-                                priceInfo.price === null ? "text-gray-500" :
-                                isSelected ? "text-violet-300" : "text-violet-400"
-                              }`}>
-                                {priceInfo.price_formatted}
+                          <div className="flex-1 min-w-0 flex items-start justify-between gap-2">
+                            <div className="flex-1">
+                              <span 
+                                className={`cursor-pointer ${isSelected ? "text-violet-300" : ""}`}
+                                onClick={() => toggleActivitySelection(key)}
+                              >
+                                {item}
                               </span>
-                            )}
-                            {loadingActivities && !priceInfo && (
-                              <span className="ml-2 inline-block w-10 h-3 rounded shimmer-bg-dark" />
+                              {priceInfo && !isLogistical && (
+                                <span className={`ml-2 text-xs font-medium ${
+                                  priceInfo.price === 0 ? "text-gray-500" :
+                                  priceInfo.price === null ? "text-gray-500" :
+                                  isSelected ? "text-violet-300" : "text-violet-400"
+                                }`}>
+                                  {priceInfo.price_formatted}
+                                </span>
+                              )}
+                              {loadingActivities && !priceInfo && !isLogistical && (
+                                <span className="ml-2 inline-block w-10 h-3 rounded shimmer-bg-dark" />
+                              )}
+                            </div>
+                            {!isLogistical && (
+                              <a
+                                href={activityUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className={`shrink-0 mt-0.5 p-1 transition-colors ${
+                                  hasOfficialLink 
+                                    ? "text-violet-400 hover:text-violet-300" 
+                                    : "text-gray-500 hover:text-violet-400"
+                                }`}
+                                onClick={(e) => e.stopPropagation()}
+                                title={hasOfficialLink ? `Visit ${priceInfo?.source || "website"}` : "Search for more info"}
+                              >
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                                  <polyline points="15 3 21 3 21 9"/>
+                                  <line x1="10" y1="14" x2="21" y2="3"/>
+                                </svg>
+                              </a>
                             )}
                           </div>
                         </li>
@@ -672,7 +807,7 @@ export default function Home() {
                     return (
                       <div key={day.day} className="space-y-3">
                         <div className="flex items-center gap-3">
-                          <span className="w-8 h-8 flex items-center justify-center bg-gradient-to-r from-blue-600 to-violet-400 text-white text-xs font-bold rounded-full">
+                          <span className="w-8 h-8 flex items-center justify-center bg-gradient-to-r from-[#3D0E9D] to-[#0C316C] text-white text-xs font-bold rounded-full">
                             {day.day}
                           </span>
                           <h4 className="text-sm font-bold text-white">{day.title}</h4>
@@ -731,7 +866,7 @@ export default function Home() {
                       <div className="flex items-center gap-2 pt-2">
                         <div className="flex gap-1">
                           {[0, 1, 2].map((i) => (
-                            <span key={i} className="w-1.5 h-1.5 bg-gradient-to-r from-blue-600 to-violet-400 rounded-full" style={{ animation: `bounce-dot 1.4s infinite ease-in-out ${i * 0.16}s` }} />
+                            <span key={i} className="w-1.5 h-1.5 bg-gradient-to-r from-[#3D0E9D] to-[#0C316C] rounded-full" style={{ animation: `bounce-dot 1.4s infinite ease-in-out ${i * 0.16}s` }} />
                           ))}
                         </div>
                         <span className="text-xs text-gray-400">Searching flights...</span>
@@ -758,7 +893,7 @@ export default function Home() {
                             <div className="flex items-center justify-between mb-2">
                               <div className="flex items-center gap-2">
                                 <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center transition-colors ${
-                                  isSelected ? "border-violet-400 bg-gradient-to-r from-blue-600 to-violet-400" : "border-gray-600"
+                                  isSelected ? "border-violet-400 bg-gradient-to-r from-[#3D0E9D] to-[#0C316C]" : "border-gray-600"
                                 }`}>
                                   {isSelected && (
                                     <svg width="12" height="12" fill="none" stroke="white" strokeWidth="2.5">
@@ -877,7 +1012,7 @@ export default function Home() {
                       <div className="flex items-center gap-2 pt-2">
                         <div className="flex gap-1">
                           {[0, 1, 2].map((i) => (
-                            <span key={i} className="w-1.5 h-1.5 bg-gradient-to-r from-blue-600 to-violet-400 rounded-full" style={{ animation: `bounce-dot 1.4s infinite ease-in-out ${i * 0.16}s` }} />
+                            <span key={i} className="w-1.5 h-1.5 bg-gradient-to-r from-[#3D0E9D] to-[#0C316C] rounded-full" style={{ animation: `bounce-dot 1.4s infinite ease-in-out ${i * 0.16}s` }} />
                           ))}
                         </div>
                         <span className="text-xs text-gray-400">Finding best hotels...</span>
@@ -917,7 +1052,7 @@ export default function Home() {
                                   </div>
                                 )}
                                 <div className={`absolute -top-1 -left-1 w-5 h-5 rounded-full border-2 flex items-center justify-center transition-colors ${
-                                  isSelected ? "border-violet-400 bg-gradient-to-r from-blue-600 to-violet-400" : "border-gray-600 bg-gray-900"
+                                  isSelected ? "border-violet-400 bg-gradient-to-r from-[#3D0E9D] to-[#0C316C]" : "border-gray-600 bg-gray-900"
                                 }`}>
                                   {isSelected && (
                                     <svg width="12" height="12" fill="none" stroke="white" strokeWidth="2.5">
@@ -1067,8 +1202,8 @@ export default function Home() {
         {/* Header */}
         <header className="sticky top-0 z-20 h-16 flex items-center justify-between px-6 bg-[#0a0a0a] border-b border-gray-800">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 bg-gradient-to-r from-blue-600 to-violet-400 rounded-xl flex items-center justify-center p-1.5">
-              <img src="/logo.png" alt="Sidequest Logo" className="w-full h-full object-contain" />
+            <div className="w-9 h-9 bg-gradient-to-r from-[#3D0E9D] to-[#0C316C] rounded-full flex items-center justify-center p-2">
+              <img src="/logo.png" alt="Sidequest Logo" className="w-full h-full object-contain rounded-full" />
             </div>
             <span className="text-base font-bold text-white">sidequest</span>
           </div>
@@ -1093,10 +1228,34 @@ export default function Home() {
               <p className="text-lg text-gray-400">describe your dream, and i'll make it a reality.</p>
             </div>
 
+            {/* Missing Info Prompt */}
+            {missingFields.length > 0 && (
+              <div className="bg-gradient-to-r from-[#3D0E9D]/20 to-[#0C316C]/20 border border-violet-500/30 rounded-2xl p-5 space-y-3">
+                <div className="flex items-start gap-3">
+                  <div className="w-8 h-8 bg-violet-500/20 rounded-full flex items-center justify-center shrink-0">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="12" cy="12" r="10"/>
+                      <path d="M12 16v-4"/>
+                      <path d="M12 8h.01"/>
+                    </svg>
+                  </div>
+                  <div>
+                    <p className="text-sm font-semibold text-white">I need a bit more info to plan your trip</p>
+                    <p className="text-sm text-gray-400 mt-1">
+                      Please provide: <span className="text-violet-300">{missingFields.join(", ")}</span>
+                    </p>
+                  </div>
+                </div>
+                <p className="text-xs text-gray-500 ml-11">
+                  Example: "March 15-22" or "5 days starting next Friday"
+                </p>
+              </div>
+            )}
+
             {/* Main Input */}
             <form onSubmit={handleSubmit} className="space-y-5">
               <div 
-                className="relative bg-[#1a1a1a] rounded-2xl overflow-hidden"
+                className="relative bg-[#1a1a1a] rounded-full overflow-hidden"
                 style={{ boxShadow: '0 0 0 1px rgba(255,255,255,0.1), 0 4px 12px rgba(0,0,0,0.3)' }}
               >
                 <input
@@ -1104,27 +1263,21 @@ export default function Home() {
                   type="text"
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
-                  placeholder="Plan a trip from NYC to Tokyo, March 15-22..."
+                  placeholder={missingFields.length > 0 
+                    ? `Add the missing info: ${missingFields.join(", ")}...` 
+                    : "Plan a trip from NYC to Tokyo, March 15-22..."}
                   disabled={loading}
-                  className="w-full h-14 pl-5 pr-28 text-base text-white bg-[#1a1a1a] placeholder-gray-500 border-0 focus:ring-0 focus:outline-none"
+                  className="w-full h-14 pl-5 pr-16 text-base text-white bg-[#1a1a1a] placeholder-gray-500 border-0 focus:ring-0 focus:outline-none"
                   style={{ fontSize: '16px' }}
                 />
-                <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-2">
-                  <button
-                    type="button"
-                    className="w-10 h-10 flex items-center justify-center text-gray-500 hover:text-gray-300 hover:bg-gray-800 rounded-xl transition-colors"
-                  >
-                    <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/>
-                    </svg>
-                  </button>
+                <div className="absolute right-3 top-1/2 -translate-y-1/2">
                   <button
                     type="submit"
                     disabled={loading || !input.trim()}
-                    className="w-10 h-10 flex items-center justify-center bg-gradient-to-r from-blue-600 to-violet-400 text-white rounded-xl hover:bg-gradient-to-r from-blue-600 to-violet-400 disabled:bg-gray-700 disabled:text-gray-500 disabled:cursor-not-allowed transition-colors"
+                    className="w-10 h-10 flex items-center justify-center bg-gradient-to-r from-[#3D0E9D] to-[#0C316C] text-white rounded-full disabled:bg-gray-700 disabled:text-gray-500 disabled:cursor-not-allowed transition-colors"
                     style={{ boxShadow: '0 1px 3px rgba(0,0,0,0.3)' }}
                   >
-                    <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>
                     </svg>
                   </button>
@@ -1138,13 +1291,13 @@ export default function Home() {
                   onClick={() => setShowVideoInput(!showVideoInput)}
                   className={`flex items-center gap-2 px-5 py-2.5 text-sm font-semibold rounded-full transition-all ${
                     showVideoInput || videoEntries.length > 0
-                      ? 'bg-gradient-to-r from-blue-600 to-violet-400 text-white'
+                      ? 'bg-gradient-to-r from-[#3D0E9D] to-[#0C316C] text-white'
                       : 'bg-[#1a1a1a] text-gray-400 hover:text-white border border-gray-700 hover:border-gray-600'
                   }`}
                   style={{ boxShadow: showVideoInput || videoEntries.length > 0 ? '0 2px 8px rgba(167,139,250,0.3)' : 'none' }}
                 >
-                  <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="m22 8-6 4 6 4V8Z"/><rect width="14" height="12" x="2" y="6" rx="2" ry="2"/>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+                    <polygon points="5,3 19,12 5,21"/>
                   </svg>
                   {videoEntries.length > 0 ? `${videoEntries.length} video${videoEntries.length > 1 ? 's' : ''}` : 'Add videos'}
                 </button>
@@ -1153,13 +1306,13 @@ export default function Home() {
                   onClick={() => setShowPreferences(!showPreferences)}
                   className={`flex items-center gap-2 px-5 py-2.5 text-sm font-semibold rounded-full transition-all ${
                     showPreferences || activityPreferences
-                      ? 'bg-gradient-to-r from-blue-600 to-violet-400 text-white'
+                      ? 'bg-gradient-to-r from-[#3D0E9D] to-[#0C316C] text-white'
                       : 'bg-[#1a1a1a] text-gray-400 hover:text-white border border-gray-700 hover:border-gray-600'
                   }`}
                   style={{ boxShadow: showPreferences || activityPreferences ? '0 2px 8px rgba(167,139,250,0.3)' : 'none' }}
                 >
-                  <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="12" r="3"/><path d="M12 1v2m0 18v2M4.2 4.2l1.4 1.4m12.8 12.8 1.4 1.4M1 12h2m18 0h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
                   </svg>
                   Preferences
                 </button>
@@ -1172,7 +1325,9 @@ export default function Home() {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <div className="w-8 h-8 bg-gray-800 rounded-lg flex items-center justify-center">
-                      <svg width="16" height="16" fill="none" stroke="#a78bfa" strokeWidth="2"><path d="m22 8-6 4 6 4V8Z"/><rect width="14" height="12" x="2" y="6" rx="2"/></svg>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="#a78bfa" stroke="none">
+                        <polygon points="5,3 19,12 5,21"/>
+                      </svg>
                     </div>
                     <div>
                       <span className="text-sm font-bold text-white">Add travel videos</span>
@@ -1180,7 +1335,7 @@ export default function Home() {
                     </div>
                   </div>
                   {videoEntries.length > 0 && (
-                    <span className="px-2.5 py-1 text-xs font-bold bg-gradient-to-r from-blue-600 to-violet-400 text-white rounded-full">
+                    <span className="px-2.5 py-1 text-xs font-bold bg-gradient-to-r from-[#3D0E9D] to-[#0C316C] text-white rounded-full">
                       {videoEntries.length}
                     </span>
                   )}
@@ -1199,7 +1354,7 @@ export default function Home() {
                     type="button"
                     onClick={addVideoUrl}
                     disabled={!newVideoUrl.trim()}
-                    className="h-12 px-6 text-sm font-bold bg-gradient-to-r from-blue-600 to-violet-400 text-white rounded-xl hover:bg-gradient-to-r from-blue-600 to-violet-400 disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed transition-colors"
+                    className="h-12 px-6 text-sm font-bold bg-gradient-to-r from-[#3D0E9D] to-[#0C316C] text-white rounded-xl hover:bg-gradient-to-r from-[#3D0E9D] to-[#0C316C] disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed transition-colors"
                   >
                     Add
                   </button>
@@ -1219,14 +1374,14 @@ export default function Home() {
                         <div className="flex items-start justify-between">
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2 mb-2">
-                              <span className="w-5 h-5 flex items-center justify-center bg-gradient-to-r from-blue-600 to-violet-400 text-white text-[10px] font-bold rounded-full">{idx + 1}</span>
+                              <span className="w-5 h-5 flex items-center justify-center bg-gradient-to-r from-[#3D0E9D] to-[#0C316C] text-white text-[10px] font-bold rounded-full">{idx + 1}</span>
                               <p className="text-xs font-mono text-gray-400 truncate">{video.url}</p>
                             </div>
                             {video.status === "analyzing" && (
                               <div className="flex items-center gap-2 mt-2">
                                 <div className="flex gap-1">
                                   {[0, 1, 2].map((i) => (
-                                    <span key={i} className="w-1.5 h-1.5 bg-gradient-to-r from-blue-600 to-violet-400 rounded-full" style={{ animation: `bounce-dot 1.4s infinite ease-in-out ${i * 0.16}s` }} />
+                                    <span key={i} className="w-1.5 h-1.5 bg-gradient-to-r from-[#3D0E9D] to-[#0C316C] rounded-full" style={{ animation: `bounce-dot 1.4s infinite ease-in-out ${i * 0.16}s` }} />
                                   ))}
                                 </div>
                                 <span className="text-xs font-semibold text-violet-300">Detecting places...</span>
@@ -1289,7 +1444,9 @@ export default function Home() {
               <div className="bg-[#141414] rounded-2xl p-6 space-y-4 border border-gray-800">
                 <div className="flex items-center gap-3">
                   <div className="w-8 h-8 bg-gray-800 rounded-lg flex items-center justify-center">
-                    <svg width="16" height="16" fill="none" stroke="#a78bfa" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v2m0 18v2M4.2 4.2l1.4 1.4m12.8 12.8 1.4 1.4M1 12h2m18 0h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/></svg>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                    </svg>
                   </div>
                   <span className="text-sm font-bold text-white">Trip preferences</span>
                 </div>
@@ -1310,7 +1467,7 @@ export default function Home() {
               <div className="flex items-center justify-center gap-4 py-6">
                 <div className="flex gap-1.5">
                   {[0, 1, 2].map((i) => (
-                    <span key={i} className="w-2.5 h-2.5 bg-gradient-to-r from-blue-600 to-violet-400 rounded-full" style={{ animation: `bounce-dot 1.4s infinite ease-in-out ${i * 0.16}s` }} />
+                    <span key={i} className="w-2.5 h-2.5 bg-gradient-to-r from-[#3D0E9D] to-[#0C316C] rounded-full" style={{ animation: `bounce-dot 1.4s infinite ease-in-out ${i * 0.16}s` }} />
                   ))}
                 </div>
                 <span className="text-sm font-semibold text-gray-400">

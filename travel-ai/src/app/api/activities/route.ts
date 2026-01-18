@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-const SERPAPI_KEY = "019ddfecd936f26a96e26dc2f43c05860339d1b0952dcb99b855aa5e65733f05";
+const SERPAPI_KEY = "cb5448ea369792eea9a76f8afd0964c284fe561c29d37ac845c5e8b7f9333405";
 
 const ActivitySearchRequest = z.object({
   destination: z.string().min(1),
@@ -58,39 +58,11 @@ async function searchActivityPrice(
   activity: string,
   destination: string
 ): Promise<ActivityPrice> {
-  const searchQuery = `${activity} ${destination} tickets price`;
+  const searchQuery = `${activity} ${destination}`;
+  const priceSearchQuery = `${activity} ${destination} tickets price`;
 
   try {
-    // First try Google Shopping for ticket prices
-    const shoppingUrl = new URL("https://serpapi.com/search.json");
-    shoppingUrl.searchParams.set("engine", "google_shopping");
-    shoppingUrl.searchParams.set("q", searchQuery);
-    shoppingUrl.searchParams.set("api_key", SERPAPI_KEY);
-    shoppingUrl.searchParams.set("num", "5");
-
-    const shoppingRes = await fetch(shoppingUrl.toString());
-    if (shoppingRes.ok) {
-      const shoppingData = await shoppingRes.json();
-      if (shoppingData.shopping_results?.length > 0) {
-        const result = shoppingData.shopping_results[0];
-        const price = extractPrice(result.price || result.extracted_price);
-        if (price) {
-          return {
-            name: activity,
-            searchQuery,
-            price,
-            price_formatted: `$${price}`,
-            source: result.source || "Google Shopping",
-            link: result.link,
-            thumbnail: result.thumbnail,
-            rating: result.rating,
-            reviews: result.reviews,
-          };
-        }
-      }
-    }
-
-    // Fallback to regular Google search for prices
+    // First, search for the official website/link for this activity
     const searchUrl = new URL("https://serpapi.com/search.json");
     searchUrl.searchParams.set("engine", "google");
     searchUrl.searchParams.set("q", searchQuery);
@@ -98,74 +70,129 @@ async function searchActivityPrice(
     searchUrl.searchParams.set("num", "10");
 
     const searchRes = await fetch(searchUrl.toString());
+    let officialLink: string | undefined;
+    let officialSource: string = "Unknown";
+    let foundPrice: number | null = null;
+    let priceFormatted: string = "";
+    let description: string | undefined;
+    let rating: number | undefined;
+    let reviews: number | undefined;
+    let thumbnail: string | undefined;
+
     if (searchRes.ok) {
       const searchData = await searchRes.json();
 
-      // Check for knowledge graph pricing
-      if (searchData.knowledge_graph?.price) {
-        const price = extractPrice(searchData.knowledge_graph.price);
-        return {
-          name: activity,
-          searchQuery,
-          price,
-          price_formatted: price ? `$${price}` : "Price varies",
-          source: "Google",
-          link: searchData.knowledge_graph.website,
-          description: searchData.knowledge_graph.description,
-        };
-      }
-
-      // Check organic results for price mentions
-      for (const result of searchData.organic_results || []) {
-        const priceMatch = (result.snippet || "").match(
-          /\$(\d+(?:\.\d{2})?)|(\d+(?:\.\d{2})?)\s*(?:USD|dollars?)/i
-        );
-        if (priceMatch) {
-          const price = parseFloat(priceMatch[1] || priceMatch[2]);
-          return {
-            name: activity,
-            searchQuery,
-            price,
-            price_formatted: `$${price}`,
-            source: result.source || extractDomain(result.link),
-            link: result.link,
-            description: result.snippet,
-          };
+      // Priority 1: Knowledge graph (most authoritative for places/businesses)
+      if (searchData.knowledge_graph) {
+        const kg = searchData.knowledge_graph;
+        officialLink = kg.website || kg.reservation_link || kg.directions_link;
+        officialSource = kg.title || activity;
+        description = kg.description;
+        if (kg.rating) rating = kg.rating;
+        if (kg.reviews) reviews = kg.reviews;
+        if (kg.price) {
+          foundPrice = extractPrice(kg.price);
+          priceFormatted = foundPrice ? `$${foundPrice}` : "Price varies";
         }
       }
 
-      // Check local results (like Google Maps listings)
-      if (searchData.local_results?.places) {
-        for (const place of searchData.local_results.places) {
-          if (place.price) {
-            const price = extractPrice(place.price);
-            return {
-              name: activity,
-              searchQuery,
-              price,
-              price_formatted: price ? `$${price}` : place.price,
-              source: "Google Maps",
-              link: place.link,
-              rating: place.rating,
-              reviews: place.reviews,
-              thumbnail: place.thumbnail,
-            };
+      // Priority 2: Local results (Google Maps listings - great for restaurants, attractions)
+      if (!officialLink && searchData.local_results?.places?.length > 0) {
+        const place = searchData.local_results.places[0];
+        officialLink = place.links?.website || place.link;
+        officialSource = place.title || extractDomain(officialLink);
+        rating = place.rating;
+        reviews = place.reviews;
+        thumbnail = place.thumbnail;
+        if (place.price) {
+          foundPrice = extractPrice(place.price);
+          priceFormatted = foundPrice ? `$${foundPrice}` : place.price;
+        }
+      }
+
+      // Priority 3: First organic result that looks like an official site
+      if (!officialLink && searchData.organic_results?.length > 0) {
+        // Try to find the official website (not aggregators like TripAdvisor, Yelp first)
+        const officialSite = searchData.organic_results.find((r: any) => {
+          const domain = extractDomain(r.link).toLowerCase();
+          // Skip aggregator sites - we want the actual venue's site
+          const isAggregator = /tripadvisor|yelp|expedia|booking\.com|viator|getyourguide|klook|timeout|thrillist|eater/i.test(domain);
+          return !isAggregator;
+        });
+        
+        if (officialSite) {
+          officialLink = officialSite.link;
+          officialSource = officialSite.source || extractDomain(officialSite.link);
+          description = officialSite.snippet;
+        } else {
+          // Fall back to first result if no non-aggregator found
+          const firstResult = searchData.organic_results[0];
+          officialLink = firstResult.link;
+          officialSource = firstResult.source || extractDomain(firstResult.link);
+          description = firstResult.snippet;
+        }
+        
+        // Check if any result has price in snippet
+        for (const result of searchData.organic_results) {
+          const priceMatch = (result.snippet || "").match(
+            /\$(\d+(?:\.\d{2})?)|(\d+(?:\.\d{2})?)\s*(?:USD|dollars?)/i
+          );
+          if (priceMatch) {
+            foundPrice = parseFloat(priceMatch[1] || priceMatch[2]);
+            priceFormatted = `$${foundPrice}`;
+            break;
           }
         }
       }
     }
 
-    // Return estimated prices for common activity types
-    const estimatedPrice = estimateActivityPrice(activity);
+    // If we haven't found a price yet, try Google Shopping
+    if (!foundPrice) {
+      const shoppingUrl = new URL("https://serpapi.com/search.json");
+      shoppingUrl.searchParams.set("engine", "google_shopping");
+      shoppingUrl.searchParams.set("q", priceSearchQuery);
+      shoppingUrl.searchParams.set("api_key", SERPAPI_KEY);
+      shoppingUrl.searchParams.set("num", "5");
+
+      const shoppingRes = await fetch(shoppingUrl.toString());
+      if (shoppingRes.ok) {
+        const shoppingData = await shoppingRes.json();
+        if (shoppingData.shopping_results?.length > 0) {
+          const result = shoppingData.shopping_results[0];
+          const price = extractPrice(result.price || result.extracted_price);
+          if (price) {
+            foundPrice = price;
+            priceFormatted = `$${price}`;
+            // Only use shopping link if we don't have a better one
+            if (!officialLink) {
+              officialLink = result.link;
+              officialSource = result.source || "Booking";
+            }
+          }
+        }
+      }
+    }
+
+    // Fall back to estimated price if nothing found
+    if (!foundPrice) {
+      foundPrice = estimateActivityPrice(activity);
+      priceFormatted = foundPrice ? `~$${foundPrice}` : "Free/Varies";
+    }
+
     return {
       name: activity,
       searchQuery,
-      price: estimatedPrice,
-      price_formatted: estimatedPrice ? `~$${estimatedPrice}` : "Free/Varies",
-      source: "Estimated",
+      price: foundPrice,
+      price_formatted: priceFormatted,
+      source: officialSource,
+      link: officialLink,
+      description,
+      rating,
+      reviews,
+      thumbnail,
     };
   } catch (error) {
-    console.error(`Error searching price for ${activity}:`, error);
+    console.error(`Error searching for ${activity}:`, error);
     const estimatedPrice = estimateActivityPrice(activity);
     return {
       name: activity,
